@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.env
+.venv/
+venv/
+env/
+build/
+.idea/
+.vscode/
+.pytest_cache/
+*.log
+bench_data_*.csv
+symposium_upload_*.csv
+.tmp/*
+/tmp/*

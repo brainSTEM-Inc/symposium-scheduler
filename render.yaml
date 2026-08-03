@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: symposium-scheduler
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app --workers 2 --timeout 120
+    envVars:
+      - key: FLASK_SECRET_KEY
+        sync: false
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: MAX_CONTENT_LENGTH
+        value: "16777216"
+      - key: WORKFLOW_TTL_SECONDS
+        value: "86400"
+      - key: WORKFLOW_MAX_ACTIVE
+        value: "120"

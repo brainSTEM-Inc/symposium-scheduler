@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Symposium Scheduler — Setup</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+</head>
+<body>
+  <div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h1 class="mb-0">Screen 3 — Pre-Scheduling Setup</h1>
+      <div>
+        <a href="/responses" class="btn btn-outline-secondary me-2">Back to Responses</a>
+      </div>
+    </div>
+    <p class="text-muted">Screen 3 of 5: Configure manual settings before generation.</p>
+
+    <form method="post" action="/setup" class="row g-3">
+      <div class="col-12">
+        <label class="form-label">Designate presenters for large room (soft preference)</label>
+        <div class="border rounded p-2" style="max-height: 260px; overflow:auto;">
+          {% for row in presenter_rows %}
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="{{ row.name }}" name="manual_large_room" id="lr-{{ loop.index0 }}">
+            <label class="form-check-label" for="lr-{{ loop.index0 }}">
+              {{ row.name }} <span class="text-muted">({{ row.topics }})</span>
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Manual pins JSON (presenter → {"period":"PD 2","day":"Tuesday, December 15th","room":0})</label>
+        <textarea class="form-control" name="pins_json" rows="4">{{ pins_json }}</textarea>
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Fixed empty slots JSON (e.g. [["PD 2","Tuesday, December 15th",0]])</label>
+        <textarea class="form-control" name="fixed_empty_slots_json" rows="3">{{ fixed_json }}</textarea>
+      </div>
+
+      <div class="col-md-2">
+        <label class="form-label">Restart count</label>
+        <input class="form-control" type="number" name="num_restarts" value="{{ num_restarts }}">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Results</label>
+        <input class="form-control" type="number" name="num_results" value="{{ num_results }}">
+      </div>
+
+      <div class="col-12">
+        <button class="btn btn-primary" type="submit">Run Scheduler (Screen 4)</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>
