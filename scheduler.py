@@ -726,10 +726,9 @@ def _anneal(
 
     outer_limit = max_outer_iterations
     if outer_limit is None:
-        # Slightly tighter default to keep 50-60 presenter schedules responsive while
-        # retaining enough exploration for quality.
-        # This keeps runtime well within target windows even under load.
-        outer_limit = max(180, min(360, len(all_presenters) * 6))
+        # Default schedule count-dependent annealing budget tuned for better solution
+        # quality on medium-size instances (around 50-70 presenters).
+        outer_limit = max(240, min(540, len(all_presenters) * 8))
 
     outer_count = 0
     if time_budget_seconds is not None and time_budget_seconds <= 0:
@@ -949,7 +948,7 @@ def _generate_candidates(
     num_results: int,
     fixed_empty: set[SlotKey],
     domains: Dict[Presenter, List[SlotKey]],
-    iterations_per_temp: int = 10,
+    iterations_per_temp: int = 12,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
     progress_callback=None,
@@ -1018,7 +1017,7 @@ def run(
     progress_callback=None,
     fixed_empty_slots: Optional[Iterable[Tuple[str, str, int]]] = None,
     manual_large_room: Optional[Iterable[str]] = None,
-    iterations_per_temp: int = 8,
+    iterations_per_temp: int = 12,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:

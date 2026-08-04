@@ -10,7 +10,12 @@
   <div class="container py-4">
     <h1 class="mb-3">Screen 4 — Generating Schedules</h1>
     <p class="text-muted">Screen 4 of 5: background optimization running.</p>
-    <p class="small text-muted">Engine iterations: {{ num_restarts }} • Candidates: {{ num_results }}</p>
+    <p class="small text-muted">
+      Engine iterations: {{ num_restarts }} • Candidates: {{ num_results }}
+      {% if time_budget_seconds %}
+        • Time budget: {{ time_budget_seconds }}s
+      {% endif %}
+    </p>
 
     <div id="status" class="alert alert-secondary">Starting generation...</div>
 

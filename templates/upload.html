@@ -57,11 +57,42 @@
       </div>
       <div class="col-md-4">
         <label class="form-label">Engine iterations</label>
-        <input class="form-control" type="number" name="num_restarts" value="10">
+        <input class="form-control" type="number" name="num_restarts" value="20">
       </div>
       <div class="col-md-4">
         <label class="form-label">Candidates to return</label>
         <input class="form-control" type="number" name="num_results" value="5">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Time budget (seconds, optional)</label>
+        <input class="form-control" type="number" name="time_budget_seconds" value="180">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Iterations per temp</label>
+        <input class="form-control" type="number" name="iterations_per_temp" value="12">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Max outer iterations (optional)</label>
+        <input class="form-control" type="number" name="max_outer_iterations" placeholder="auto">
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Penalty weights</label>
+        <div class="row g-2">
+          {% for key, value in PENALTIES.items() %}
+          <div class="col-md-4">
+            <label class="form-label small text-muted">{{ key.replace('_', ' ') | title }}</label>
+            <input
+              class="form-control"
+              type="number"
+              name="penalty_{{ key }}"
+              value="{{ value }}"
+              min="0"
+              title="{{ key }}"
+            >
+          </div>
+          {% endfor %}
+        </div>
       </div>
 
       <div class="col-12">

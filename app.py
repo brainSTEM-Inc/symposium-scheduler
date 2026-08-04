@@ -14,7 +14,15 @@ import pandas as pd
 from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from scheduler import DEFAULT_COL_CONFIG, DEFAULT_STRUCTURE, PENALTIES, load_dataframe, parse_presenters, run
+from scheduler import (
+    DEFAULT_COL_CONFIG,
+    DEFAULT_STRUCTURE,
+    PENALTIES,
+    _score_schedule,
+    load_dataframe,
+    parse_presenters,
+    run,
+)
 
 
 app = Flask(__name__)
@@ -108,6 +116,7 @@ def _handle_too_large_error(exc):
             error="The uploaded file is too large. Maximum size is 16 MB.",
             col_config=DEFAULT_COL_CONFIG,
             structure=DEFAULT_STRUCTURE,
+            PENALTIES=PENALTIES,
         ),
         413,
     )
@@ -256,9 +265,41 @@ def _build_candidate_slot_grid(
         ordered_cells[day] = day_cells
 
     presenter_titles = {}
+    topic_colors: Dict[str, str] = {}
+    all_topics = sorted(
+        {
+            topic.strip().lower()
+            for presenter in presenters_by_name.values()
+            if presenter is not None
+            for topic in getattr(presenter, "topics", [])
+            if isinstance(topic, str) and topic.strip()
+        }
+    )
+    for index, topic in enumerate(all_topics):
+        hue = int((index * 137.5) % 360)
+        topic_colors[topic] = f"hsl({hue}, 78%, 88%)"
+
+    presenter_styles: Dict[str, str] = {}
+    presenter_topics: Dict[str, str] = {}
     for name, presenter in presenters_by_name.items():
         if presenter is not None:
             presenter_titles[name] = str(getattr(presenter, "title", "") or "")
+            topics = [str(topic).strip() for topic in getattr(presenter, "topics", []) if str(topic).strip()]
+            presenter_topics[name] = ", ".join(topics)
+            normalized_topics = [topic.lower() for topic in topics]
+            style = ""
+            if len(normalized_topics) == 1:
+                color = topic_colors.get(normalized_topics[0], "#f8f9fa")
+                style = f"background: {color};"
+            elif len(normalized_topics) >= 2:
+                color_a = topic_colors.get(normalized_topics[0], "#e9ecef")
+                color_b = topic_colors.get(normalized_topics[1], "#dee2e6")
+                style = (
+                    f"background: linear-gradient(90deg, {color_a} 0% 50%, {color_b} 50% 100%);"
+                )
+            else:
+                style = "background: #f8f9fa;"
+            presenter_styles[name] = style
 
     return {
         "days": day_order,
@@ -266,6 +307,8 @@ def _build_candidate_slot_grid(
         "rooms": list(range(num_rooms)),
         "cells": ordered_cells,
         "presenter_titles": presenter_titles,
+        "presenter_topics": presenter_topics,
+        "presenter_styles": presenter_styles,
         "initial_pins": initial_pins,
         "large_room_index": int(structure.get("large_room_index", 0)),
         "presenters_per_room": int(structure.get("presenters_per_room", 0)),
@@ -330,6 +373,10 @@ def _safe_build_state(source_type: str, source: str, col_config: Dict[str, str],
         "fixed_empty_slots": [],
         "num_restarts": 10,
         "num_results": 5,
+        "time_budget_seconds": 180,
+        "iterations_per_temp": 12,
+        "max_outer_iterations": None,
+        "penalties": PENALTIES.copy(),
         "run_in_progress": False,
         "run_progress": [],
         "run_result": None,
@@ -345,6 +392,64 @@ def _coerce_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_optional_int(value: Any, default: Optional[int]) -> Optional[int]:
+    if value is None:
+        return default
+    try:
+        text = str(value).strip()
+        if not text:
+            return default
+        return int(text)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_penalties(form: Any) -> Dict[str, int]:
+    if not isinstance(form, dict):
+        return PENALTIES.copy()
+    penalties: Dict[str, int] = {}
+    for key, default_value in PENALTIES.items():
+        penalties[key] = max(0, _coerce_int(form.get(f"penalty_{key}"), default_value))
+    return penalties
+
+
+def _build_empty_grid_slots(structure: Dict[str, Any]) -> list[tuple[str, str, int]]:
+    slots: list[tuple[str, str, int]] = []
+    periods = [str(period) for period in structure.get("periods", []) if str(period).strip()]
+    days = [str(day) for day in structure.get("days", []) if str(day).strip()]
+    num_rooms = int(structure.get("num_rooms", 0))
+    for day in days:
+        for period in periods:
+            for room in range(num_rooms):
+                slots.append((period, day, room))
+    return slots
+
+
+def _schedule_from_candidate(
+    candidate_schedule: Dict[str, list[str]], structure: Dict[str, Any]
+) -> Dict[tuple[str, str, int], list[str]]:
+    grid = {slot: [] for slot in _build_empty_grid_slots(structure)}
+    if not isinstance(candidate_schedule, dict):
+        return grid
+
+    for raw_slot, presenter_names in candidate_schedule.items():
+        parsed = _parse_schedule_slot(raw_slot)
+        if parsed is None:
+            continue
+        grid[parsed] = [name for name in (presenter_names or []) if isinstance(name, str)]
+    return grid
+
+
+def _candidate_has_overflow(schedule: Dict[str, Any], structure: Dict[str, Any]) -> bool:
+    cap = int(structure.get("presenters_per_room", 0))
+    if cap <= 0:
+        return False
+    for presenters in schedule.values():
+        if isinstance(presenters, list) and len(presenters) > cap:
+            return True
+    return False
 
 
 def _launch_generation(workflow_id: str):
@@ -385,17 +490,24 @@ def _launch_generation(workflow_id: str):
                 num_restarts = state.get("num_restarts", 10)
                 num_results = state.get("num_results", 5)
                 manual_large_room = state.get("manual_large_room", [])
+                penalties = state.get("penalties", PENALTIES)
+                time_budget_seconds = state.get("time_budget_seconds")
+                iterations_per_temp = state.get("iterations_per_temp", 12)
+                max_outer_iterations = state.get("max_outer_iterations")
 
             result = run(
                 source,
                 col_config=col_config,
                 structure=structure,
                 pins=pins,
-                penalties=PENALTIES,
+                penalties=penalties,
                 num_restarts=num_restarts,
                 num_results=num_results,
                 fixed_empty_slots=fixed_empty_slots,
                 manual_large_room=manual_large_room,
+                iterations_per_temp=iterations_per_temp,
+                max_outer_iterations=max_outer_iterations,
+                time_budget_seconds=time_budget_seconds,
                 progress_callback=_progress,
             )
 
@@ -421,6 +533,7 @@ def index():
         "upload.html",
         col_config=DEFAULT_COL_CONFIG,
         structure=DEFAULT_STRUCTURE,
+        PENALTIES=PENALTIES,
     )
 
 
@@ -436,6 +549,7 @@ def start_workflow():
                     error="Please upload a CSV file or provide a Google Sheets public CSV link.",
                     col_config=DEFAULT_COL_CONFIG,
                     structure=DEFAULT_STRUCTURE,
+                    PENALTIES=PENALTIES,
                 ),
                 400,
             )
@@ -449,6 +563,7 @@ def start_workflow():
                     error="Only CSV files are supported for upload.",
                     col_config=DEFAULT_COL_CONFIG,
                     structure=DEFAULT_STRUCTURE,
+                    PENALTIES=PENALTIES,
                 ),
                 400,
             )
@@ -481,6 +596,7 @@ def start_workflow():
                 error=str(exc),
                 col_config=col_config,
                 structure=structure,
+                PENALTIES=PENALTIES,
             ),
             400,
         )
@@ -490,6 +606,17 @@ def start_workflow():
     with WORKFLOW_LOCK:
         state["num_restarts"] = _coerce_int(request.form.get("num_restarts"), state.get("num_restarts", 10))
         state["num_results"] = _coerce_int(request.form.get("num_results"), state.get("num_results", 5))
+        state["time_budget_seconds"] = _coerce_optional_int(request.form.get("time_budget_seconds"), 180)
+        if state["time_budget_seconds"] is not None and state["time_budget_seconds"] <= 0:
+            state["time_budget_seconds"] = None
+        state["iterations_per_temp"] = _coerce_int(
+            request.form.get("iterations_per_temp"), state.get("iterations_per_temp", 12)
+        )
+        max_outer_iterations = _coerce_optional_int(request.form.get("max_outer_iterations"), state.get("max_outer_iterations"))
+        if max_outer_iterations is not None and max_outer_iterations <= 0:
+            max_outer_iterations = None
+        state["max_outer_iterations"] = max_outer_iterations
+        state["penalties"] = _coerce_penalties(request.form)
         WORKFLOW_STATES[workflow_id] = state
     session["workflow_id"] = workflow_id
     return redirect(url_for("responses_view"))
@@ -584,6 +711,7 @@ def generating_view():
         "generating.html",
         num_restarts=state.get("num_restarts", 10),
         num_results=state.get("num_results", 5),
+        time_budget_seconds=state.get("time_budget_seconds"),
     )
 
 
@@ -635,6 +763,8 @@ def review_view():
         selected_candidate_index=selected_candidate_index,
         selected_candidate=selected_candidate,
         selected_schedule=selected_schedule,
+        has_overflow=_candidate_has_overflow(selected_candidate[1], state["structure"]),
+        export_error=request.args.get("export_error"),
     )
 
 
@@ -647,8 +777,10 @@ def review_apply_constraints():
     payload = request.get_json(silent=True)
     if isinstance(payload, dict):
         raw_pins = payload.get("pins")
+        selected_candidate_index = _coerce_int(payload.get("candidate_index"), 0)
     else:
         raw_pins = request.form.get("pins_json", "{}")
+        selected_candidate_index = _coerce_int(request.form.get("candidate_index"), 0)
     parsed = _normalize_json(raw_pins, {}) if not isinstance(raw_pins, dict) else raw_pins
     if not isinstance(parsed, dict):
         parsed = {}
@@ -672,8 +804,60 @@ def review_apply_constraints():
         normalized[name] = {"period": str(period), "day": str(day), "room": room_i}
 
     state["pins"] = normalized
-    _launch_generation(workflow_id)
-    return redirect(url_for("generating_view"))
+
+    result = state.get("run_result")
+    if not result:
+        return redirect(url_for("review_view"))
+    candidates = result.get("results", [])
+    if not candidates:
+        return redirect(url_for("review_view"))
+    if selected_candidate_index < 0 or selected_candidate_index >= len(candidates):
+        selected_candidate_index = 0
+
+    candidate = candidates[selected_candidate_index]
+    if not isinstance(candidate, (list, tuple)) or len(candidate) < 3:
+        return redirect(url_for("review_view"))
+    _, candidate_schedule, _ = candidate
+    if not isinstance(candidate_schedule, dict):
+        return redirect(url_for("review_view"))
+
+    base_grid = _schedule_from_candidate(candidate_schedule, state["structure"])
+    grid: Dict[tuple[str, str, int], list[Any]] = {}
+    presenter_by_name = state.get("presenters_by_name", {})
+    for slot, names in base_grid.items():
+        occupants: list[Any] = []
+        for name in names:
+            presenter = presenter_by_name.get(name)
+            if presenter is None:
+                continue
+            occupants.append(presenter)
+        grid[slot] = occupants
+
+    for name, target in normalized.items():
+        presenter = presenter_by_name.get(name)
+        if presenter is None:
+            continue
+        for occupants in grid.values():
+            occupants[:] = [p for p in occupants if p.name != name]
+        slot_key = (target["period"], target["day"], target["room"])
+        grid.setdefault(slot_key, [])
+        grid[slot_key].append(presenter)
+
+    serialized = {}
+    for slot, presenters in grid.items():
+        if not presenters:
+            continue
+        serialized[f"{slot[0]}|{slot[1]}|{slot[2]}"] = [p.name for p in presenters]
+
+    score, breakdown = _score_schedule(
+        {slot: list(presenters) for slot, presenters in grid.items()},
+        state["structure"],
+        state.get("penalties", PENALTIES),
+        presenters=state.get("presenters"),
+        assignment={p.name: slot for slot, presenters in grid.items() for p in presenters},
+    )
+    candidates[selected_candidate_index] = [int(score), serialized, breakdown]
+    return redirect(url_for("review_view", candidate=selected_candidate_index))
 
 
 @app.route("/review/export/<int:index>", methods=["GET"])
@@ -694,6 +878,9 @@ def review_export(index: int):
     score = candidate[0]
     schedule = candidate[1]
     breakdown = candidate[2]
+
+    if _candidate_has_overflow(schedule, state["structure"]):
+        return redirect(url_for("review_view", candidate=index, export_error="Resolve overflow slots before exporting."))
 
     if format_type == "json":
         payload = {
@@ -740,6 +927,9 @@ def api_run():
         penalties=payload.get("penalties", PENALTIES),
         num_restarts=int(payload.get("num_restarts", 20)),
         num_results=int(payload.get("num_results", 10)),
+        iterations_per_temp=int(payload.get("iterations_per_temp", 12)),
+        max_outer_iterations=_coerce_optional_int(payload.get("max_outer_iterations"), None),
+        time_budget_seconds=_coerce_optional_int(payload.get("time_budget_seconds"), None),
         fixed_empty_slots=payload.get("fixed_empty_slots", []),
         manual_large_room=payload.get("manual_large_room", []),
     )

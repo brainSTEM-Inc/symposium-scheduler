@@ -13,6 +13,10 @@
       <a href="/" class="btn btn-outline-secondary">Start Over</a>
     </div>
 
+    {% if export_error %}
+      <div class="alert alert-danger">{{ export_error }}</div>
+    {% endif %}
+
     {% if result.hard_conflicts %}
       <h4>Hard conflicts</h4>
       <ul class="list-group mb-3">
@@ -47,10 +51,18 @@
             </select>
           </div>
           <div class="col-md-3">
-            <a class="btn btn-outline-success" href="{{ url_for('review_export', index=selected_candidate_index if selected_candidate_index is not none else 0, format='csv') }}">Export CSV</a>
+            <a
+              class="btn btn-outline-success"
+              id="export-csv-btn"
+              href="{{ url_for('review_export', index=selected_candidate_index if selected_candidate_index is not none else 0, format='csv') }}"
+            >Export CSV</a>
           </div>
           <div class="col-md-3">
-            <a class="btn btn-outline-primary" href="{{ url_for('review_export', index=selected_candidate_index if selected_candidate_index is not none else 0, format='json') }}">Export JSON</a>
+            <a
+              class="btn btn-outline-primary"
+              id="export-json-btn"
+              href="{{ url_for('review_export', index=selected_candidate_index if selected_candidate_index is not none else 0, format='json') }}"
+            >Export JSON</a>
           </div>
         </div>
       </form>
@@ -67,9 +79,10 @@
 
         <form id="constraints-form" method="post" action="/review/apply_constraints" class="mb-3">
           <input type="hidden" id="pins-json" name="pins_json" value="{}">
+          <input type="hidden" id="candidate-index" name="candidate_index" value="{{ selected_candidate_index if selected_candidate_index is not none else 0 }}">
           <div class="d-flex justify-content-between align-items-center">
             <p class="text-muted mb-0" id="constraint-status">Drag cards to create constraints, then re-run.</p>
-            <button id="rerun-btn" class="btn btn-outline-primary" type="submit">Re-run with current slot placement</button>
+            <button id="rerun-btn" class="btn btn-outline-primary" type="submit">Recompute penalty breakdown</button>
           </div>
         </form>
 
@@ -108,10 +121,14 @@
                               data-day="{{ day }}"
                               data-period="{{ period }}"
                               data-room="{{ room }}"
+                              style="{% if selected_schedule.presenter_styles.get(presenter) %}{{ selected_schedule.presenter_styles[presenter] }}{% endif %}"
                             >
                               <span class="fw-semibold">{{ presenter }}</span>
                               {% if presenter_title %}
                                 <small class="text-muted">{{ presenter_title }}</small>
+                              {% endif %}
+                              {% if selected_schedule.presenter_topics.get(presenter) %}
+                                <small class="d-block text-muted">{{ selected_schedule.presenter_topics[presenter] }}</small>
                               {% endif %}
                             </div>
                           {% endfor %}
@@ -125,7 +142,10 @@
           </div>
         {% endfor %}
 
-        <p class="small text-muted">Slot capacity: {{ selected_schedule.presenters_per_room }} presenter(s) each room.</p>
+        <p class="small text-muted">
+          Slot capacity: {{ selected_schedule.presenters_per_room }} presenter(s) each room.
+          <span id="slot-capacity-state" class="text-danger {% if not has_overflow %}d-none{% endif %}">Current placement has an overflow.</span>
+        </p>
       {% endif %}
 
       <h4 class="mt-4">All candidates</h4>
@@ -162,6 +182,9 @@
     const maxPresentersPerRoom = Number({% if selected_schedule is defined %}{{ selected_schedule.presenters_per_room | default(0) }}{% else %}0{% endif %}) || 0;
     const constraintStatus = document.getElementById('constraint-status');
     const hiddenPins = document.getElementById('pins-json');
+    const exportCsvButton = document.getElementById('export-csv-btn');
+    const exportJsonButton = document.getElementById('export-json-btn');
+    const slotState = document.getElementById('slot-capacity-state');
     if (!constraintStatus || !hiddenPins) {
       // No schedule loaded yet, or candidate table not available.
     } else {
@@ -196,6 +219,36 @@
         const payload = collectPins();
         hiddenPins.value = JSON.stringify(payload);
         constraintStatus.textContent = `Constraints currently set: ${Object.keys(payload).length} presenters.`;
+        validateSlots();
+      }
+
+      function validateSlots() {
+        const payload = collectPins();
+        let hasOverflow = false;
+        slotCells.forEach((cell) => {
+          const count = cell.querySelectorAll('.presenter-card').length;
+          if (maxPresentersPerRoom > 0 && count > maxPresentersPerRoom) {
+            hasOverflow = true;
+            cell.classList.add('slot-overflow');
+          } else {
+            cell.classList.remove('slot-overflow');
+          }
+        });
+
+        if (slotState) {
+          slotState.classList.toggle('d-none', !hasOverflow);
+        }
+        if (exportCsvButton) {
+          exportCsvButton.classList.toggle('disabled', hasOverflow);
+          exportCsvButton.classList.toggle('pe-none', hasOverflow);
+        }
+        if (exportJsonButton) {
+          exportJsonButton.classList.toggle('disabled', hasOverflow);
+          exportJsonButton.classList.toggle('pe-none', hasOverflow);
+        }
+        if (hasOverflow) {
+          constraintStatus.textContent = `${Object.keys(payload).length} presenters changed. Fix any overflow slot (shown in red) to re-run or export.`;
+        }
       }
 
       let dragPayload = null;
@@ -243,13 +296,6 @@
             return;
           }
 
-          if (maxPresentersPerRoom > 0) {
-            const targetCount = cell.querySelectorAll('.presenter-card').length;
-            if (targetCount >= maxPresentersPerRoom) {
-              return;
-            }
-          }
-
           sourceCard.dataset.day = cell.dataset.day;
           sourceCard.dataset.period = cell.dataset.period;
           sourceCard.dataset.room = cell.dataset.room;
@@ -264,9 +310,10 @@
       const constraintsForm = document.getElementById('constraints-form');
       constraintsForm?.addEventListener('submit', (event) => {
         refreshConstraintStatus();
-        if (!hiddenPins.value || hiddenPins.value === '{}') {
+        const hasOverflow = slotState ? !slotState.classList.contains('d-none') : false;
+        if (hasOverflow) {
           event.preventDefault();
-          constraintStatus.textContent = 'Move at least one presenter before applying constraints.';
+          constraintStatus.textContent = 'Fix overflow slots before recomputing.';
         }
       });
 
@@ -291,6 +338,10 @@
       vertical-align: top;
       min-width: 160px;
       min-height: 90px;
+    }
+
+    .slot-overflow {
+      background: rgba(220, 53, 69, 0.08);
     }
   </style>
 
