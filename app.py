@@ -37,7 +37,7 @@ def _is_allowed_upload(filename: str) -> bool:
 
 
 WORKFLOW_STATES: Dict[str, Dict[str, Any]] = {}
-WORKFLOW_LOCK = threading.Lock()
+WORKFLOW_LOCK = threading.RLock()
 
 
 def _split_csv_lines(raw: str):
@@ -419,9 +419,9 @@ def start_workflow():
             400,
         )
 
+    _prune_workflow_states()
     workflow_id = uuid.uuid4().hex
     with WORKFLOW_LOCK:
-        _prune_workflow_states()
         WORKFLOW_STATES[workflow_id] = state
     session["workflow_id"] = workflow_id
     return redirect(url_for("responses_view"))

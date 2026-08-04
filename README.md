@@ -72,7 +72,7 @@ result = run(
 
 - [`sample_58_presenters.csv`](sample_58_presenters.csv)
   - ~58 synthetic presenters
-  - reasonable `Best friend(s)` coverage
+  - dense `Best friend(s)` coverage (about 8 per presenter on average)
   - sparse but present `Preferred co-presenter(s)` entries
 
 ## Notes
