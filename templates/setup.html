@@ -11,47 +11,29 @@
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h1 class="mb-0">Screen 3 — Pre-Scheduling Setup</h1>
       <div>
-        <a href="/responses" class="btn btn-outline-secondary me-2">Back to Responses</a>
+        <a href="/responses" class="btn btn-outline-secondary me-2">Back</a>
+        <button form="setup-form" type="submit" class="btn btn-primary">Run Scheduler (Screen 4)</button>
       </div>
     </div>
     <p class="text-muted">Screen 3 of 5: Configure manual settings before generation.</p>
 
-    <form method="post" action="/setup" class="row g-3">
+    <form method="post" action="/setup" id="setup-form" class="row g-3">
       <div class="col-12">
         <label class="form-label">Designate presenters for large room (soft preference)</label>
         <div class="border rounded p-2" style="max-height: 260px; overflow:auto;">
+          {% if presenter_rows %}
           {% for row in presenter_rows %}
           <div class="form-check">
             <input class="form-check-input" type="checkbox" value="{{ row.name }}" name="manual_large_room" id="lr-{{ loop.index0 }}">
             <label class="form-check-label" for="lr-{{ loop.index0 }}">
-              {{ row.name }} <span class="text-muted">({{ row.topics }})</span>
+              {{ row.name }} <span class="text-muted">({{ row.topics }})</span> — <strong>{{ row.large_room }}</strong>
             </label>
           </div>
           {% endfor %}
+          {% else %}
+          <p class="text-muted mb-0">No presenters marked Yes/Maybe for the large room question.</p>
+          {% endif %}
         </div>
-      </div>
-
-      <div class="col-12">
-        <label class="form-label">Manual pins JSON (presenter → {"period":"PD 2","day":"Tuesday, December 15th","room":0})</label>
-        <textarea class="form-control" name="pins_json" rows="4">{{ pins_json }}</textarea>
-      </div>
-
-      <div class="col-12">
-        <label class="form-label">Fixed empty slots JSON (e.g. [["PD 2","Tuesday, December 15th",0]])</label>
-        <textarea class="form-control" name="fixed_empty_slots_json" rows="3">{{ fixed_json }}</textarea>
-      </div>
-
-      <div class="col-md-2">
-        <label class="form-label">Restart count</label>
-        <input class="form-control" type="number" name="num_restarts" value="{{ num_restarts }}">
-      </div>
-      <div class="col-md-2">
-        <label class="form-label">Results</label>
-        <input class="form-control" type="number" name="num_results" value="{{ num_results }}">
-      </div>
-
-      <div class="col-12">
-        <button class="btn btn-primary" type="submit">Run Scheduler (Screen 4)</button>
       </div>
     </form>
   </div>

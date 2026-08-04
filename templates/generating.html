@@ -10,6 +10,7 @@
   <div class="container py-4">
     <h1 class="mb-3">Screen 4 — Generating Schedules</h1>
     <p class="text-muted">Screen 4 of 5: background optimization running.</p>
+    <p class="small text-muted">Engine iterations: {{ num_restarts }} • Candidates: {{ num_results }}</p>
 
     <div id="status" class="alert alert-secondary">Starting generation...</div>
 
@@ -18,7 +19,6 @@
         <thead>
           <tr>
             <th>Run</th>
-            <th>Total</th>
             <th>Latest best score</th>
           </tr>
         </thead>
@@ -49,7 +49,7 @@
         body.innerHTML = '';
         entries.slice(-12).forEach((entry) => {
           const row = document.createElement('tr');
-          row.innerHTML = `<td>${entry.run_number}</td><td>${entry.total}</td><td>${entry.best_score ?? 'N/A'}</td>`;
+          row.innerHTML = `<td>${entry.run_number ?? ''}</td><td>${entry.best_score ?? 'N/A'}</td>`;
           body.appendChild(row);
         });
 

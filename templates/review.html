@@ -65,28 +65,67 @@
           {% endfor %}
         </ul>
 
-        <div class="table-responsive mb-4">
-          <table class="table table-sm table-bordered">
-            <thead>
-              <tr>
-                <th>Day</th>
-                <th>Period</th>
-                <th>Room</th>
-                <th>Presenters</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for slot in selected_schedule %}
+        <form id="constraints-form" method="post" action="/review/apply_constraints" class="mb-3">
+          <input type="hidden" id="pins-json" name="pins_json" value="{}">
+          <div class="d-flex justify-content-between align-items-center">
+            <p class="text-muted mb-0" id="constraint-status">Drag cards to create constraints, then re-run.</p>
+            <button id="rerun-btn" class="btn btn-outline-primary" type="submit">Re-run with current slot placement</button>
+          </div>
+        </form>
+
+        {% for day in selected_schedule.days %}
+          <h5 class="mt-4">{{ day }}</h5>
+          <div class="table-responsive mb-3">
+            <table class="table table-sm table-bordered">
+              <thead>
                 <tr>
-                  <td>{{ slot.day }}</td>
-                  <td>{{ slot.period }}</td>
-                  <td>{{ slot.room + 1 }}</td>
-                  <td>{{ slot.presenters | join(', ') if slot.presenters else '—' }}</td>
+                  <th>Period</th>
+                  {% for room in selected_schedule.rooms %}
+                    <th>
+                      Room {{ room + 1 }}
+                      {% if room == selected_schedule.large_room_index %}
+                        <span class="badge text-bg-info ms-1">Large room</span>
+                      {% endif %}
+                    </th>
+                  {% endfor %}
                 </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {% for period in selected_schedule.periods %}
+                  <tr>
+                    <td>{{ period }}</td>
+                    {% for room in selected_schedule.rooms %}
+                      {% set slot_presenters = selected_schedule.cells.get(day, {}).get(room, {}).get(period, []) %}
+                      <td class="slot-cell p-2" data-day="{{ day }}" data-period="{{ period }}" data-room="{{ room }}">
+                        <div class="d-flex flex-column gap-1">
+                          {% for presenter in slot_presenters %}
+                            {% set presenter_title = selected_schedule.presenter_titles.get(presenter, '') %}
+                            <div
+                              class="presenter-card card card-body py-1 px-2"
+                              draggable="true"
+                              data-presenter-id="{{ day }}-{{ room }}-{{ period }}-{{ loop.index0 }}"
+                              data-presenter-name="{{ presenter }}"
+                              data-day="{{ day }}"
+                              data-period="{{ period }}"
+                              data-room="{{ room }}"
+                            >
+                              <span class="fw-semibold">{{ presenter }}</span>
+                              {% if presenter_title %}
+                                <small class="text-muted">{{ presenter_title }}</small>
+                              {% endif %}
+                            </div>
+                          {% endfor %}
+                        </div>
+                      </td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endfor %}
+
+        <p class="small text-muted">Slot capacity: {{ selected_schedule.presenters_per_room }} presenter(s) each room.</p>
       {% endif %}
 
       <h4 class="mt-4">All candidates</h4>
@@ -118,6 +157,142 @@
       <p>No schedules generated.</p>
     {% endif %}
   </div>
+
+  <script>
+    const maxPresentersPerRoom = Number({% if selected_schedule is defined %}{{ selected_schedule.presenters_per_room | default(0) }}{% else %}0{% endif %}) || 0;
+    const constraintStatus = document.getElementById('constraint-status');
+    const hiddenPins = document.getElementById('pins-json');
+    if (!constraintStatus || !hiddenPins) {
+      // No schedule loaded yet, or candidate table not available.
+    } else {
+      const basePins = {{ selected_schedule.initial_pins | default({}) | tojson }};
+      const slotCells = Array.from(document.querySelectorAll('.slot-cell'));
+      const presenterCards = Array.from(document.querySelectorAll('.presenter-card'));
+
+      function collectPins() {
+        const pins = {};
+        document.querySelectorAll('.presenter-card').forEach((card) => {
+          const name = card.dataset.presenterName;
+          if (!name) {
+            return;
+          }
+          const placement = {
+            period: card.dataset.period,
+            day: card.dataset.day,
+            room: Number(card.dataset.room),
+          };
+          const base = basePins[name];
+          if (!base) {
+            return;
+          }
+          if (base.day !== placement.day || base.period !== placement.period || base.room !== placement.room) {
+            pins[name] = placement;
+          }
+        });
+        return pins;
+      }
+
+      function refreshConstraintStatus() {
+        const payload = collectPins();
+        hiddenPins.value = JSON.stringify(payload);
+        constraintStatus.textContent = `Constraints currently set: ${Object.keys(payload).length} presenters.`;
+      }
+
+      let dragPayload = null;
+
+      presenterCards.forEach((card) => {
+        card.addEventListener('dragstart', (event) => {
+          dragPayload = {
+            presenterId: card.dataset.presenterId,
+            day: card.dataset.day,
+            period: card.dataset.period,
+            room: card.dataset.room,
+          };
+          event.dataTransfer.setData('text/plain', JSON.stringify(dragPayload));
+          event.dataTransfer.effectAllowed = 'move';
+          card.classList.add('opacity-75');
+        });
+
+        card.addEventListener('dragend', () => {
+          card.classList.remove('opacity-75');
+          dragPayload = null;
+        });
+      });
+
+      slotCells.forEach((cell) => {
+        cell.addEventListener('dragover', (event) => {
+          event.preventDefault();
+        });
+
+        cell.addEventListener('drop', (event) => {
+          event.preventDefault();
+          if (!dragPayload) {
+            return;
+          }
+
+          const sourceCard = document.querySelector(`[data-presenter-id="${dragPayload.presenterId}"]`);
+          if (!sourceCard) {
+            return;
+          }
+
+          const sameLocation =
+            sourceCard.dataset.day === cell.dataset.day &&
+            sourceCard.dataset.period === cell.dataset.period &&
+            sourceCard.dataset.room === cell.dataset.room;
+          if (sameLocation) {
+            return;
+          }
+
+          if (maxPresentersPerRoom > 0) {
+            const targetCount = cell.querySelectorAll('.presenter-card').length;
+            if (targetCount >= maxPresentersPerRoom) {
+              return;
+            }
+          }
+
+          sourceCard.dataset.day = cell.dataset.day;
+          sourceCard.dataset.period = cell.dataset.period;
+          sourceCard.dataset.room = cell.dataset.room;
+          const body = cell.querySelector('.d-flex');
+          if (body) {
+            body.appendChild(sourceCard);
+          }
+          refreshConstraintStatus();
+        });
+      });
+
+      const constraintsForm = document.getElementById('constraints-form');
+      constraintsForm?.addEventListener('submit', (event) => {
+        refreshConstraintStatus();
+        if (!hiddenPins.value || hiddenPins.value === '{}') {
+          event.preventDefault();
+          constraintStatus.textContent = 'Move at least one presenter before applying constraints.';
+        }
+      });
+
+      refreshConstraintStatus();
+    }
+  </script>
+
+  <style>
+    .presenter-card {
+      font-size: 0.8rem;
+      cursor: grab;
+      user-select: none;
+      background-color: #f8f9fa;
+      border: 1px solid rgba(0, 0, 0, 0.15);
+    }
+
+    .presenter-card:active {
+      cursor: grabbing;
+    }
+
+    .slot-cell {
+      vertical-align: top;
+      min-width: 160px;
+      min-height: 90px;
+    }
+  </style>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

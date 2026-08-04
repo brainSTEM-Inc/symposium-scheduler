@@ -206,6 +206,72 @@ def _candidate_csv_rows(candidate: list[Any], structure: Dict[str, Any]) -> list
     return out
 
 
+def _build_candidate_slot_grid(
+    candidate: list[Any],
+    structure: Dict[str, Any],
+    presenters_by_name: Dict[str, Any],
+) -> dict[str, Any]:
+    if not candidate:
+        return {
+            "days": structure.get("days", []),
+            "periods": structure.get("periods", []),
+            "rooms": list(range(int(structure.get("num_rooms", 1)))),
+            "cells": {},
+            "presenter_titles": {},
+            "large_room_index": int(structure.get("large_room_index", 0)),
+        }
+
+    _, schedule, _ = candidate
+    parsed_slots: dict[tuple[str, str, int], list[str]] = {}
+    initial_pins: dict[str, dict[str, Any]] = {}
+    day_order = list(structure.get("days", []))
+    period_order = list(structure.get("periods", []))
+
+    for raw_key, presenters in schedule.items():
+        parsed = _parse_schedule_slot(raw_key)
+        if parsed is None:
+            continue
+        period, day, room = parsed
+        if day not in day_order:
+            day_order.append(day)
+        if period not in period_order:
+            period_order.append(period)
+        slot_presenters = [str(p) for p in (presenters or [])]
+        parsed_slots[(day, period, room)] = slot_presenters
+        for presenter_name in slot_presenters:
+            initial_pins[presenter_name] = {"day": day, "period": period, "room": room}
+
+    if not day_order:
+        day_order = sorted({day for day, _, _ in parsed_slots}) if parsed_slots else []
+    if not period_order:
+        period_order = sorted({period for _, period, _ in parsed_slots}) if parsed_slots else []
+    num_rooms = int(structure.get("num_rooms", 0) or 0)
+
+    ordered_cells: dict[str, dict[int, dict[str, list[str]]]] = {}
+    for day in day_order:
+        day_cells = {}
+        for room in range(num_rooms):
+            room_cells = {period: parsed_slots.get((day, period, room), []) for period in period_order}
+            day_cells[room] = room_cells
+        ordered_cells[day] = day_cells
+
+    presenter_titles = {}
+    for name, presenter in presenters_by_name.items():
+        if presenter is not None:
+            presenter_titles[name] = str(getattr(presenter, "title", "") or "")
+
+    return {
+        "days": day_order,
+        "periods": period_order,
+        "rooms": list(range(num_rooms)),
+        "cells": ordered_cells,
+        "presenter_titles": presenter_titles,
+        "initial_pins": initial_pins,
+        "large_room_index": int(structure.get("large_room_index", 0)),
+        "presenters_per_room": int(structure.get("presenters_per_room", 0)),
+    }
+
+
 def _build_discarded_ppp_warnings(presenters):
     warnings = []
     for presenter in presenters:
@@ -422,6 +488,8 @@ def start_workflow():
     _prune_workflow_states()
     workflow_id = uuid.uuid4().hex
     with WORKFLOW_LOCK:
+        state["num_restarts"] = _coerce_int(request.form.get("num_restarts"), state.get("num_restarts", 10))
+        state["num_results"] = _coerce_int(request.form.get("num_results"), state.get("num_results", 5))
         WORKFLOW_STATES[workflow_id] = state
     session["workflow_id"] = workflow_id
     return redirect(url_for("responses_view"))
@@ -475,14 +543,8 @@ def setup():
         return redirect(url_for("index"))
 
     if request.method == "POST":
-        raw_pins = request.form.get("pins_json", "").strip()
-        raw_fixed_empty = request.form.get("fixed_empty_slots_json", "").strip()
         manual_large = request.form.getlist("manual_large_room")
-        state["pins"] = _normalize_json(raw_pins, {})
-        state["fixed_empty_slots"] = _normalize_json(raw_fixed_empty, [])
         state["manual_large_room"] = manual_large
-        state["num_restarts"] = _coerce_int(request.form.get("num_restarts"), state.get("num_restarts", 10))
-        state["num_results"] = _coerce_int(request.form.get("num_results"), state.get("num_results", 5))
 
         _launch_generation(workflow_id)
         return redirect(url_for("generating_view"))
@@ -492,10 +554,13 @@ def setup():
         name = str(row.get(state["col_config"]["name"], "")).strip()
         if not name:
             continue
+        large_room = str(row.get(state["col_config"]["large_room"], "")).strip().lower()
+        if large_room not in {"yes", "maybe"}:
+            continue
         presenter_rows.append(
             {
                 "name": name,
-                "large_room": str(row.get(state["col_config"]["large_room"], "")).strip(),
+                "large_room": str(row.get(state["col_config"]["large_room"], "")).strip() or "Maybe",
                 "topics": str(row.get(state["col_config"]["topics"], "")).strip(),
             }
         )
@@ -504,8 +569,6 @@ def setup():
         "setup.html",
         structure=state["structure"],
         presenter_rows=presenter_rows,
-        pins_json=json.dumps(state.get("pins", {}), ensure_ascii=False),
-        fixed_json=json.dumps(state.get("fixed_empty_slots", []), ensure_ascii=False),
         num_restarts=state["num_restarts"],
         num_results=state["num_results"],
     )
@@ -517,7 +580,11 @@ def generating_view():
     if not state:
         return redirect(url_for("index"))
 
-    return render_template("generating.html")
+    return render_template(
+        "generating.html",
+        num_restarts=state.get("num_restarts", 10),
+        num_results=state.get("num_results", 5),
+    )
 
 
 @app.route("/api/run_status", methods=["GET"])
@@ -555,7 +622,11 @@ def review_view():
         selected_candidate_index = 0
 
     selected_candidate = candidates[selected_candidate_index]
-    selected_schedule = _build_candidate_slot_rows(selected_candidate[1], state["structure"])
+    selected_schedule = _build_candidate_slot_grid(
+        selected_candidate,
+        state["structure"],
+        state.get("presenters_by_name", {}),
+    )
     return render_template(
         "review.html",
         result=result,
@@ -565,6 +636,44 @@ def review_view():
         selected_candidate=selected_candidate,
         selected_schedule=selected_schedule,
     )
+
+
+@app.route("/review/apply_constraints", methods=["POST"])
+def review_apply_constraints():
+    workflow_id, state = _with_state()
+    if not state:
+        return redirect(url_for("index"))
+
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        raw_pins = payload.get("pins")
+    else:
+        raw_pins = request.form.get("pins_json", "{}")
+    parsed = _normalize_json(raw_pins, {}) if not isinstance(raw_pins, dict) else raw_pins
+    if not isinstance(parsed, dict):
+        parsed = {}
+    valid_names = set((state.get("presenters_by_name") or {}).keys())
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_pin in parsed.items():
+        name = str(raw_name).strip()
+        if name not in valid_names:
+            continue
+        if not isinstance(raw_pin, dict):
+            continue
+        period = raw_pin.get("period")
+        day = raw_pin.get("day")
+        room = raw_pin.get("room")
+        if period is None or day is None or room is None:
+            continue
+        try:
+            room_i = int(room)
+        except (TypeError, ValueError):
+            continue
+        normalized[name] = {"period": str(period), "day": str(day), "room": room_i}
+
+    state["pins"] = normalized
+    _launch_generation(workflow_id)
+    return redirect(url_for("generating_view"))
 
 
 @app.route("/review/export/<int:index>", methods=["GET"])

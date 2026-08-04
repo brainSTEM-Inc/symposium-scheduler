@@ -10,7 +10,10 @@
   <div class="container py-4">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h1 class="mb-0">Screen 2 — Responses Viewer</h1>
-      <a href="/setup" class="btn btn-outline-primary">Continue to Setup</a>
+      <div>
+        <a href="/" class="btn btn-outline-secondary me-2">Back</a>
+        <a href="/setup" class="btn btn-primary">Continue to Setup</a>
+      </div>
     </div>
     <p class="text-muted">Screen 2 of 5: Confirm parsed presenter responses and make edits if needed.</p>
 
@@ -38,7 +41,7 @@
       </div>
       <div class="col-md-6">
         <label class="form-label">Presenter count</label>
-        <input type="text" class="form-control" value="{{ num_presenters }}" readonly>
+        <input type="text" id="presenter-count" class="form-control" value="{{ num_presenters }}" readonly>
       </div>
     </div>
 
@@ -81,13 +84,27 @@
   <script>
     const topicInput = document.getElementById('topic-filter');
     const rows = document.querySelectorAll('#presenter-table tbody tr');
-    topicInput.addEventListener('input', () => {
+    const presenterCountInput = document.getElementById('presenter-count');
+
+    function updatePresenterCount() {
       const needle = topicInput.value.trim().toLowerCase();
+      let visibleCount = 0;
       rows.forEach((row) => {
         const topicCell = row.children[2].textContent.toLowerCase();
-        row.style.display = !needle || topicCell.includes(needle) ? '' : 'none';
+        const visible = !needle || topicCell.includes(needle);
+        row.style.display = visible ? '' : 'none';
+        if (visible) {
+          visibleCount += 1;
+        }
       });
+      presenterCountInput.value = visibleCount;
+    }
+
+    topicInput.addEventListener('input', () => {
+      updatePresenterCount();
     });
+
+    updatePresenterCount();
   </script>
 </body>
 </html>
