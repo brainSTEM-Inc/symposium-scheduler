@@ -18,6 +18,7 @@ from scheduler import (
     DEFAULT_COL_CONFIG,
     DEFAULT_STRUCTURE,
     PENALTIES,
+    _parse_fixed_empty_slots,
     _score_schedule,
     load_dataframe,
     parse_presenters,
@@ -452,6 +453,68 @@ def _candidate_has_overflow(schedule: Dict[str, Any], structure: Dict[str, Any])
     return False
 
 
+def _collect_schedule_feasibility_violations(
+    schedule: Dict[tuple[str, str, int], list[Any]],
+    state: Dict[str, Any],
+) -> list[str]:
+    structure = state.get("structure", {})
+    periods = [str(period) for period in structure.get("periods", [])]
+    days = [str(day) for day in structure.get("days", [])]
+    num_rooms = int(structure.get("num_rooms", 0))
+    capacity = int(structure.get("presenters_per_room", 0))
+    large_room_index = int(structure.get("large_room_index", 0))
+    fixed_empty = _parse_fixed_empty_slots(state.get("fixed_empty_slots", []), structure, days)
+
+    valid_periods = set(periods)
+    valid_days = set(days)
+    known_presenters = state.get("presenters_by_name", {})
+    present_in_slots: set[str] = set()
+    violations: list[str] = []
+
+    for slot, presenters in schedule.items():
+        period, day, room = slot
+        if period not in valid_periods or day not in valid_days:
+            violations.append(f"Invalid slot {period}|{day}|{room} in drag result.")
+            continue
+        if room < 0 or room >= num_rooms:
+            violations.append(f"Invalid room index {room} in slot {period}|{day}.")
+            continue
+        if slot in fixed_empty:
+            violations.append(f"Slot {period}|{day}|{room} is fixed empty.")
+            continue
+        if capacity > 0 and len(presenters) > capacity:
+            violations.append(
+                f"Slot {period}|{day}|Room {room + 1} has {len(presenters)} presenters, above capacity {capacity}."
+            )
+
+        for presenter in presenters:
+            name = getattr(presenter, "name", "")
+            if not name:
+                continue
+            if name in present_in_slots:
+                violations.append(f"Presenter {name} appears more than once.")
+            else:
+                present_in_slots.add(name)
+
+            if (period, day) not in getattr(presenter, "_availability_set", set()):
+                violations.append(f"{name} is unavailable in {period}|{day}.")
+            if room == large_room_index and str(getattr(presenter, "large_room", "")) == "No":
+                violations.append(f"{name} cannot be assigned to the large room.")
+            if presenter.pinned_slot is not None and (period, day) != presenter.pinned_slot:
+                violations.append(f"{name} is pinned to a different period/day.")
+            if presenter.pinned_room is not None and room != presenter.pinned_room:
+                violations.append(f"{name} is pinned to a different room.")
+
+    missing_presenters = set(known_presenters.keys()) - present_in_slots
+    if missing_presenters:
+        missing_preview = ", ".join(sorted(missing_presenters))
+        if len(missing_presenters) > 8:
+            missing_preview += ", ..."
+        violations.append(f"Missing presenters in schedule: {missing_preview}.")
+
+    return sorted(set(violations))
+
+
 def _launch_generation(workflow_id: str):
     def _runner():
         with WORKFLOW_LOCK:
@@ -765,6 +828,7 @@ def review_view():
         selected_schedule=selected_schedule,
         has_overflow=_candidate_has_overflow(selected_candidate[1], state["structure"]),
         export_error=request.args.get("export_error"),
+        constraint_error=request.args.get("constraint_error"),
     )
 
 
@@ -803,8 +867,6 @@ def review_apply_constraints():
             continue
         normalized[name] = {"period": str(period), "day": str(day), "room": room_i}
 
-    state["pins"] = normalized
-
     result = state.get("run_result")
     if not result:
         return redirect(url_for("review_view"))
@@ -842,6 +904,14 @@ def review_apply_constraints():
         slot_key = (target["period"], target["day"], target["room"])
         grid.setdefault(slot_key, [])
         grid[slot_key].append(presenter)
+
+    violations = _collect_schedule_feasibility_violations(grid, state)
+    if violations:
+        error = "Constraint violations prevent recompute: " + "; ".join(violations[:8])
+        if len(violations) > 8:
+            error += "; ..."
+        return redirect(url_for("review_view", candidate=selected_candidate_index, constraint_error=error))
+    state["pins"] = normalized
 
     serialized = {}
     for slot, presenters in grid.items():

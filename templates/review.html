@@ -16,6 +16,9 @@
     {% if export_error %}
       <div class="alert alert-danger">{{ export_error }}</div>
     {% endif %}
+    {% if constraint_error %}
+      <div class="alert alert-warning">{{ constraint_error }}</div>
+    {% endif %}
 
     {% if result.hard_conflicts %}
       <h4>Hard conflicts</h4>
