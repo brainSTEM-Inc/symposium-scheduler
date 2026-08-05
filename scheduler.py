@@ -385,6 +385,44 @@ def _parse_fixed_empty_slots(raw: Any, structure: Dict[str, Any], days: Sequence
             slots.add((str(period).strip(), str(day).strip(), room_i))
     return slots
 
+
+def _parse_room_unavailable_slots(
+    raw: Any,
+    structure: Dict[str, Any],
+    days: Sequence[str],
+) -> set[SlotKey]:
+    if raw is None:
+        return set()
+    if not isinstance(raw, Iterable) or isinstance(raw, str):
+        return set()
+    periods = {str(period).strip() for period in structure.get("periods", [])}
+    valid_days = {str(day).strip() for day in days}
+    num_rooms = int(structure.get("num_rooms", 0) or 0)
+    unavailable: set[SlotKey] = set()
+    for item in raw:
+        if isinstance(item, str):
+            parts = [part.strip() for part in item.split("|")]
+            if len(parts) != 3:
+                continue
+            period, day, room_raw = parts
+        elif isinstance(item, (list, tuple)) and len(item) == 3:
+            period = str(item[0]).strip()
+            day = str(item[1]).strip()
+            room_raw = item[2]
+        else:
+            continue
+        if period not in periods or day not in valid_days:
+            continue
+        try:
+            room = int(room_raw)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= room < num_rooms):
+            continue
+        unavailable.add((period, day, room))
+    return unavailable
+
+
 def _coerce_pin_to_slot(
     pin: Dict[str, Any],
     periods: Sequence[str],
@@ -462,8 +500,11 @@ def _slot_available_for_presenter(
     schedule: Dict[SlotKey, List[Presenter]],
     structure: Dict[str, Any],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
 ) -> bool:
     if slot in fixed_empty:
+        return False
+    if slot in room_unavailable:
         return False
     if (slot[0], slot[1]) not in presenter._availability_set:
         return False
@@ -486,11 +527,14 @@ def _domain_for_presenter(
     slots: Sequence[SlotKey],
     structure: Dict[str, Any],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
 ) -> List[SlotKey]:
     allowed: List[SlotKey] = []
     if presenter.pinned_room is not None and presenter.pinned_slot is not None:
         slot = (presenter.pinned_slot[0], presenter.pinned_slot[1], presenter.pinned_room)
         if slot in fixed_empty:
+            return []
+        if slot in room_unavailable:
             return []
         if slot in slots:
             return [slot]
@@ -503,6 +547,8 @@ def _domain_for_presenter(
         if room < 0 or room >= int(structure["num_rooms"]):
             continue
         if (period, day, room) in fixed_empty:
+            continue
+        if (period, day, room) in room_unavailable:
             continue
         if presenter.pinned_slot is not None and (period, day) != presenter.pinned_slot:
             continue
@@ -604,6 +650,7 @@ def _find_best_slot_for_presenter(
     schedule: Dict[SlotKey, List[Presenter]],
     structure: Dict[str, Any],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
     penalties: Dict[str, int],
     rng: random.Random,
 ) -> Optional[SlotKey]:
@@ -611,7 +658,9 @@ def _find_best_slot_for_presenter(
     large_room_idx = int(structure["large_room_index"])
 
     for slot in domains:
-        if not _slot_available_for_presenter(presenter, slot, schedule, structure, fixed_empty):
+        if not _slot_available_for_presenter(
+            presenter, slot, schedule, structure, fixed_empty, room_unavailable
+        ):
             continue
         roommates = schedule.get(slot, [])
         score = 0.0
@@ -640,6 +689,7 @@ def _seed_schedule(
     penalties: Dict[str, int],
     domains: Dict[Presenter, List[SlotKey]],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
     rng: random.Random,
 ) -> Tuple[Optional[Dict[SlotKey, List[Presenter]]], List[str]]:
     schedule = _initial_schedule(slots, presenters, fixed_empty)
@@ -648,7 +698,9 @@ def _seed_schedule(
     for presenter in presenters:
         if presenter.pinned_slot and presenter.pinned_room is not None:
             target = (presenter.pinned_slot[0], presenter.pinned_slot[1], presenter.pinned_room)
-            if not _slot_available_for_presenter(presenter, target, schedule, structure, fixed_empty):
+            if not _slot_available_for_presenter(
+                presenter, target, schedule, structure, fixed_empty, room_unavailable
+            ):
                 hard_conflicts.append(
                     f"{presenter.name} is pinned to room {presenter.pinned_room} in {presenter.pinned_slot[0]} | {presenter.pinned_slot[1]} but cannot be placed."
                 )
@@ -660,7 +712,7 @@ def _seed_schedule(
     for presenter in pinned_slot_only:
         domain = [slot for slot in domains.get(presenter, []) if (slot[0], slot[1]) == presenter.pinned_slot]
         choice = _find_best_slot_for_presenter(
-            presenter, domain, schedule, structure, fixed_empty, penalties, rng
+            presenter, domain, schedule, structure, fixed_empty, room_unavailable, penalties, rng
         )
         if choice is None:
             hard_conflicts.append(
@@ -681,7 +733,7 @@ def _seed_schedule(
     unpinned.sort(key=priority_key)
     for presenter in unpinned:
         best_slot = _find_best_slot_for_presenter(
-            presenter, domains.get(presenter, []), schedule, structure, fixed_empty, penalties, rng
+            presenter, domains.get(presenter, []), schedule, structure, fixed_empty, room_unavailable, penalties, rng
         )
         if best_slot is None:
             hard_conflicts.append(f"{presenter.name} has no available legal slot in the greedy seeding phase.")
@@ -696,6 +748,7 @@ def _anneal(
     structure: Dict[str, Any],
     penalties: Dict[str, int],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
     iterations_per_temp: int = 10,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
@@ -755,7 +808,9 @@ def _anneal(
             assignment[b.name] = slot_a
 
             def can_place(p: Presenter, target_slot: SlotKey) -> bool:
-                if not _slot_available_for_presenter(p, target_slot, current_schedule, structure, fixed_empty):
+                if not _slot_available_for_presenter(
+                    p, target_slot, current_schedule, structure, fixed_empty, room_unavailable
+                ):
                     return False
                 return True
 
@@ -876,6 +931,7 @@ def _build_domains(
     slots: List[SlotKey],
     structure: Dict[str, Any],
     fixed_empty: set[SlotKey],
+    room_unavailable: set[SlotKey],
     hard_conflicts: List[Dict[str, str]],
 ) -> Tuple[Dict[Presenter, List[SlotKey]], List[str], List[Dict[str, str]]]:
     domains: Dict[Presenter, List[SlotKey]] = {}
@@ -884,7 +940,7 @@ def _build_domains(
     slot_room_pin_counts: Dict[Tuple[str, str, int], int] = {}
 
     for p in presenters:
-        domain = _domain_for_presenter(p, slots, structure, fixed_empty)
+        domain = _domain_for_presenter(p, slots, structure, fixed_empty, room_unavailable)
         if p.pinned_slot is not None and not domain:
             unavoidable_hards.append(
                 f"{p.name} is pinned to {p.pinned_slot[0]} | {p.pinned_slot[1]} but is not available at that time."
@@ -948,6 +1004,7 @@ def _generate_candidates(
     num_results: int,
     fixed_empty: set[SlotKey],
     domains: Dict[Presenter, List[SlotKey]],
+    room_unavailable: set[SlotKey],
     iterations_per_temp: int = 12,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
@@ -966,11 +1023,12 @@ def _generate_candidates(
             penalties=penalties,
             domains=domains,
             fixed_empty=fixed_empty,
+            room_unavailable=room_unavailable,
             rng=rng,
         )
         if hard:
             if progress_callback is not None:
-                progress_callback(run_i + 1, num_restarts, None)
+                progress_callback(run_i + 1, num_restarts, None, len(all_candidates))
             continue
         score, schedule, breakdown = _anneal(
             seeded,
@@ -980,12 +1038,13 @@ def _generate_candidates(
             iterations_per_temp=iterations_per_temp,
             max_outer_iterations=max_outer_iterations,
             time_budget_seconds=time_budget_seconds,
+            room_unavailable=room_unavailable,
             progress_callback=progress_callback,
             rng_seed=run_seed + 13,
         )
         all_candidates.append((score, schedule, breakdown))
         if progress_callback is not None:
-            progress_callback(run_i + 1, num_restarts, score)
+            progress_callback(run_i + 1, num_restarts, score, len(all_candidates))
 
     all_candidates.sort(key=lambda item: item[0])
     distinct: List[Tuple[int, Dict[SlotKey, List[Presenter]], Dict[str, int]]] = []
@@ -1017,6 +1076,7 @@ def run(
     progress_callback=None,
     fixed_empty_slots: Optional[Iterable[Tuple[str, str, int]]] = None,
     manual_large_room: Optional[Iterable[str]] = None,
+    room_unavailable_slots: Optional[Iterable[str]] = None,
     iterations_per_temp: int = 12,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
@@ -1064,6 +1124,7 @@ def run(
         }
 
     fixed_empty = _parse_fixed_empty_slots(fixed_empty_slots, structure, structure["days"])
+    room_unavailable = _parse_room_unavailable_slots(room_unavailable_slots, structure, structure["days"])
     pin_map = _parse_pins(pins or {})
     pinned, _ = _build_presenter_pin_lookup(presenters, pin_map, structure, structure["days"])
 
@@ -1076,6 +1137,7 @@ def run(
         slots,
         structure,
         fixed_empty,
+        room_unavailable,
         hard_conflicts,
     )
     hard_conflicts.extend(
@@ -1107,6 +1169,7 @@ def run(
         num_results=num_results,
         fixed_empty=fixed_empty,
         domains=domains,
+        room_unavailable=room_unavailable,
         iterations_per_temp=iterations_per_temp,
         max_outer_iterations=max_outer_iterations,
         time_budget_seconds=time_budget_seconds,

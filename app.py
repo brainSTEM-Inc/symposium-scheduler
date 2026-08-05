@@ -118,6 +118,7 @@ def _handle_too_large_error(exc):
             col_config=DEFAULT_COL_CONFIG,
             structure=DEFAULT_STRUCTURE,
             PENALTIES=PENALTIES,
+            generation_profile=session.get("generation_profile"),
         ),
         413,
     )
@@ -132,6 +133,54 @@ def _collect_topics(df_records, col_config):
             if topic and topic not in topics:
                 topics.append(topic)
     return topics
+
+
+def _coerce_room_unavailable_payload(raw: Any, structure: Dict[str, Any]) -> list[tuple[str, str, int]]:
+    if isinstance(raw, str):
+        parsed = _normalize_json(raw, [])
+    elif isinstance(raw, list):
+        parsed = raw
+    else:
+        parsed = []
+    if not isinstance(parsed, list):
+        return []
+    periods = {str(period).strip() for period in structure.get("periods", [])}
+    days = {str(day).strip() for day in structure.get("days", [])}
+    num_rooms = int(structure.get("num_rooms", 0) or 0)
+    unavailable: list[tuple[str, str, int]] = []
+    for item in parsed:
+        period = ""
+        day = ""
+        room_text = ""
+        if isinstance(item, str):
+            parts = [part.strip() for part in item.split("|")]
+            if len(parts) != 3:
+                continue
+            period, day, room_text = parts
+        elif isinstance(item, (list, tuple)) and len(item) == 3:
+            period, day, room_text = item[0], item[1], item[2]
+            period = str(period).strip()
+            day = str(day).strip()
+            room_text = str(room_text).strip()
+        else:
+            continue
+        if period not in periods or day not in days:
+            continue
+        try:
+            room = int(room_text)
+        except (TypeError, ValueError):
+            continue
+        if room < 0 or room >= num_rooms:
+            continue
+        unavailable.append((period, day, room))
+    return unavailable
+
+
+def _room_unavailable_set_from_state(state: Dict[str, Any], structure: Dict[str, Any]) -> set[tuple[str, str, int]]:
+    unavailable: set[tuple[str, str, int]] = set()
+    for period, day, room in _coerce_room_unavailable_payload(state.get("room_unavailable_slots", []), structure):
+        unavailable.add((period, day, room))
+    return unavailable
 
 
 def _parse_schedule_slot(raw_slot: Any) -> Optional[tuple[str, str, int]]:
@@ -372,6 +421,7 @@ def _safe_build_state(source_type: str, source: str, col_config: Dict[str, str],
         "pins": {},
         "manual_large_room": [],
         "fixed_empty_slots": [],
+        "room_unavailable_slots": [],
         "num_restarts": 10,
         "num_results": 5,
         "time_budget_seconds": 180,
@@ -383,6 +433,11 @@ def _safe_build_state(source_type: str, source: str, col_config: Dict[str, str],
         "run_result": None,
         "run_error": None,
         "best_score": None,
+        "run_iterations_completed": 0,
+        "run_candidates_generated": 0,
+        "run_elapsed_seconds": 0.0,
+        "run_estimated_remaining_seconds": None,
+        "run_started_at": None,
         "discarded_ppp_warnings": _build_discarded_ppp_warnings(presenters),
         "presenters_by_name": {p.name: p for p in presenters},
     }
@@ -464,6 +519,7 @@ def _collect_schedule_feasibility_violations(
     capacity = int(structure.get("presenters_per_room", 0))
     large_room_index = int(structure.get("large_room_index", 0))
     fixed_empty = _parse_fixed_empty_slots(state.get("fixed_empty_slots", []), structure, days)
+    room_unavailable = _room_unavailable_set_from_state(state, structure)
 
     valid_periods = set(periods)
     valid_days = set(days)
@@ -481,6 +537,9 @@ def _collect_schedule_feasibility_violations(
             continue
         if slot in fixed_empty:
             violations.append(f"Slot {period}|{day}|{room} is fixed empty.")
+            continue
+        if slot in room_unavailable:
+            violations.append(f"Slot {period}|{day}|{room} is marked unavailable for that room.")
             continue
         if capacity > 0 and len(presenters) > capacity:
             violations.append(
@@ -524,8 +583,15 @@ def _launch_generation(workflow_id: str):
             state["run_in_progress"] = True
             state["run_progress"] = []
             state["run_error"] = None
+            state["run_iterations_completed"] = 0
+            state["run_candidates_generated"] = 0
+            state["run_elapsed_seconds"] = 0.0
+            state["run_estimated_remaining_seconds"] = None
+            state["run_started_at"] = time.time()
+        start_time = time.perf_counter()
 
-        def _progress(run_number, total_runs, score):
+        def _progress(run_number, total_runs, score, candidates_generated=0):
+            elapsed_seconds = time.perf_counter() - start_time
             with WORKFLOW_LOCK:
                 state_ref = WORKFLOW_STATES.get(workflow_id)
                 if not state_ref:
@@ -533,8 +599,19 @@ def _launch_generation(workflow_id: str):
                 if run_number is None:
                     return
                 state_ref["run_progress"].append(
-                    {"run_number": run_number, "total": total_runs, "best_score": score}
+                    {
+                        "run_number": run_number,
+                        "total": total_runs,
+                        "best_score": score,
+                        "candidates_generated": candidates_generated or 0,
+                    }
                 )
+                state_ref["run_iterations_completed"] = run_number
+                state_ref["run_candidates_generated"] = candidates_generated or 0
+                state_ref["run_elapsed_seconds"] = elapsed_seconds
+                if total_runs and run_number > 0:
+                    remaining_runs = max(0, total_runs - run_number)
+                    state_ref["run_estimated_remaining_seconds"] = (elapsed_seconds / run_number) * remaining_runs
                 if score is not None and (
                     state_ref.get("best_score") is None or score < state_ref.get("best_score", float("inf"))
                 ):
@@ -552,6 +629,7 @@ def _launch_generation(workflow_id: str):
                 fixed_empty_slots = state.get("fixed_empty_slots", [])
                 num_restarts = state.get("num_restarts", 10)
                 num_results = state.get("num_results", 5)
+                room_unavailable_slots = state.get("room_unavailable_slots", [])
                 manual_large_room = state.get("manual_large_room", [])
                 penalties = state.get("penalties", PENALTIES)
                 time_budget_seconds = state.get("time_budget_seconds")
@@ -568,6 +646,7 @@ def _launch_generation(workflow_id: str):
                 num_results=num_results,
                 fixed_empty_slots=fixed_empty_slots,
                 manual_large_room=manual_large_room,
+                room_unavailable_slots=room_unavailable_slots,
                 iterations_per_temp=iterations_per_temp,
                 max_outer_iterations=max_outer_iterations,
                 time_budget_seconds=time_budget_seconds,
@@ -585,6 +664,8 @@ def _launch_generation(workflow_id: str):
             with WORKFLOW_LOCK:
                 if workflow_id in WORKFLOW_STATES:
                     WORKFLOW_STATES[workflow_id]["run_in_progress"] = False
+                    WORKFLOW_STATES[workflow_id]["run_elapsed_seconds"] = time.perf_counter() - start_time
+                    WORKFLOW_STATES[workflow_id]["run_estimated_remaining_seconds"] = 0.0
 
     thread = threading.Thread(target=_runner, daemon=True)
     thread.start()
@@ -597,6 +678,7 @@ def index():
         col_config=DEFAULT_COL_CONFIG,
         structure=DEFAULT_STRUCTURE,
         PENALTIES=PENALTIES,
+        generation_profile=session.get("generation_profile"),
     )
 
 
@@ -613,6 +695,7 @@ def start_workflow():
                     col_config=DEFAULT_COL_CONFIG,
                     structure=DEFAULT_STRUCTURE,
                     PENALTIES=PENALTIES,
+                    generation_profile=session.get("generation_profile"),
                 ),
                 400,
             )
@@ -627,6 +710,7 @@ def start_workflow():
                     col_config=DEFAULT_COL_CONFIG,
                     structure=DEFAULT_STRUCTURE,
                     PENALTIES=PENALTIES,
+                    generation_profile=session.get("generation_profile"),
                 ),
                 400,
             )
@@ -660,6 +744,7 @@ def start_workflow():
                 col_config=col_config,
                 structure=structure,
                 PENALTIES=PENALTIES,
+                generation_profile=session.get("generation_profile"),
             ),
             400,
         )
@@ -735,6 +820,9 @@ def setup():
     if request.method == "POST":
         manual_large = request.form.getlist("manual_large_room")
         state["manual_large_room"] = manual_large
+        state["room_unavailable_slots"] = _coerce_room_unavailable_payload(
+            request.form.get("room_availability_json"), state["structure"]
+        )
 
         _launch_generation(workflow_id)
         return redirect(url_for("generating_view"))
@@ -761,6 +849,12 @@ def setup():
         presenter_rows=presenter_rows,
         num_restarts=state["num_restarts"],
         num_results=state["num_results"],
+        manual_large_room=state.get("manual_large_room", []),
+        room_unavailable_slots=state.get("room_unavailable_slots", []),
+        room_unavailable_slot_keys=[
+            f"{period}|{day}|{room}"
+            for period, day, room in _coerce_room_unavailable_payload(state.get("room_unavailable_slots", []), state["structure"])
+        ],
     )
 
 
@@ -775,6 +869,8 @@ def generating_view():
         num_restarts=state.get("num_restarts", 10),
         num_results=state.get("num_results", 5),
         time_budget_seconds=state.get("time_budget_seconds"),
+        iterations_per_temp=state.get("iterations_per_temp", 12),
+        run_total_restarts=state.get("num_restarts", 10),
     )
 
 
@@ -784,13 +880,31 @@ def api_run_status():
     if not state:
         return jsonify({"error": "No workflow loaded"}), 400
 
+    done = bool(state.get("run_result") is not None and not state.get("run_in_progress"))
+    if done and state.get("run_elapsed_seconds") is not None:
+        session["generation_profile"] = {
+            "elapsed_seconds": float(state.get("run_elapsed_seconds", 0.0)),
+            "num_restarts": state.get("num_restarts"),
+            "iterations_per_temp": state.get("iterations_per_temp"),
+            "num_results_requested": state.get("num_results"),
+            "candidates_generated": state.get("run_candidates_generated", 0),
+            "presenters": len(state.get("presenters", [])),
+        }
+
     return jsonify(
         {
             "run_in_progress": bool(state.get("run_in_progress")),
             "run_error": state.get("run_error"),
             "run_progress": state.get("run_progress", [])[-50:],
             "best_score": state.get("best_score"),
-            "done": bool(state.get("run_result") is not None and not state.get("run_in_progress")),
+            "done": done,
+            "run_total_restarts": state.get("num_restarts"),
+            "run_iterations_completed": state.get("run_iterations_completed", 0),
+            "run_candidates_generated": state.get("run_candidates_generated", 0),
+            "run_elapsed_seconds": state.get("run_elapsed_seconds", 0.0),
+            "run_estimated_remaining_seconds": state.get("run_estimated_remaining_seconds"),
+            "run_requested_candidates": state.get("num_results", 0),
+            "iterations_per_temp": state.get("iterations_per_temp", 12),
         }
     )
 
@@ -998,6 +1112,7 @@ def api_run():
         num_restarts=int(payload.get("num_restarts", 20)),
         num_results=int(payload.get("num_results", 10)),
         iterations_per_temp=int(payload.get("iterations_per_temp", 12)),
+        room_unavailable_slots=payload.get("room_unavailable_slots", []),
         max_outer_iterations=_coerce_optional_int(payload.get("max_outer_iterations"), None),
         time_budget_seconds=_coerce_optional_int(payload.get("time_budget_seconds"), None),
         fixed_empty_slots=payload.get("fixed_empty_slots", []),

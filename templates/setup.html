@@ -18,15 +18,33 @@
     <p class="text-muted">Screen 3 of 5: Configure manual settings before generation.</p>
 
     <form method="post" action="/setup" id="setup-form" class="row g-3">
+      <input type="hidden" name="room_availability_json" id="room-avail-json" value="{{ room_unavailable_slot_keys | default([]) | tojson }}">
+
       <div class="col-12">
         <label class="form-label">Designate presenters for large room (soft preference)</label>
         <div class="border rounded p-2" style="max-height: 260px; overflow:auto;">
           {% if presenter_rows %}
           {% for row in presenter_rows %}
           <div class="form-check">
-            <input class="form-check-input" type="checkbox" value="{{ row.name }}" name="manual_large_room" id="lr-{{ loop.index0 }}">
+            <input
+              class="form-check-input"
+              type="checkbox"
+              value="{{ row.name }}"
+              name="manual_large_room"
+              id="lr-{{ loop.index0 }}"
+              {% if row.name in manual_large_room %}
+                checked
+              {% endif %}
+            >
             <label class="form-check-label" for="lr-{{ loop.index0 }}">
-              {{ row.name }} <span class="text-muted">({{ row.topics }})</span> — <strong>{{ row.large_room }}</strong>
+              {{ row.name }} <span class="text-muted">({{ row.topics }})</span> —
+              {% if row.large_room | lower == 'yes' %}
+                <span class="fw-bold">Yes</span>
+              {% elif row.large_room | lower == 'maybe' %}
+                <span class="text-secondary">Maybe</span>
+              {% else %}
+                <span>{{ row.large_room }}</span>
+              {% endif %}
             </label>
           </div>
           {% endfor %}
@@ -35,7 +53,84 @@
           {% endif %}
         </div>
       </div>
+
+      <div class="col-12">
+        <label class="form-label">Room availability (check boxes to mark unavailable slots)</label>
+        <p class="small text-muted mb-2">
+          Unchecked means the room is available. Checked means blocked/unavailable for that period and day.
+        </p>
+        {% if structure.days and structure.periods %}
+          {% set unavailable_keys = room_unavailable_slot_keys | default([]) %}
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th style="min-width: 95px;">Room</th>
+                  {% for day in structure.days %}
+                    <th colspan="{{ structure.periods | length }}">{{ day }}</th>
+                  {% endfor %}
+                </tr>
+                <tr>
+                  <th></th>
+                  {% for day in structure.days %}
+                    {% for period in structure.periods %}
+                      <th>{{ period }}</th>
+                    {% endfor %}
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for room_index in range(structure.num_rooms | int) %}
+                  <tr>
+                    <th>Room {{ room_index + 1 }}</th>
+                    {% for day in structure.days %}
+                      {% for period in structure.periods %}
+                        {% set slot_key = period ~ "|" ~ day ~ "|" ~ room_index %}
+                        <td>
+                          <div class="form-check text-center">
+                            <input
+                              class="form-check-input room-unavailable-toggle"
+                              type="checkbox"
+                              id="room-{{ room_index }}-{{ loop.parent.loop.index0 }}-{{ loop.index0 }}"
+                              data-period="{{ period }}"
+                              data-day="{{ day }}"
+                              data-room="{{ room_index }}"
+                              {% if slot_key in unavailable_keys %}
+                                checked
+                              {% endif %}
+                            >
+                          </div>
+                        </td>
+                      {% endfor %}
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted">No periods or days were configured yet.</p>
+        {% endif %}
+      </div>
     </form>
   </div>
+
+  <script>
+    const availabilityInput = document.getElementById('room-avail-json');
+    const availabilityToggles = Array.from(document.querySelectorAll('.room-unavailable-toggle'));
+
+    function serializeUnavailableSlots() {
+      const unavailable = availabilityToggles
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => `${checkbox.dataset.period}|${checkbox.dataset.day}|${checkbox.dataset.room}`);
+      availabilityInput.value = JSON.stringify(unavailable);
+    }
+
+    availabilityToggles.forEach((checkbox) => {
+      checkbox.addEventListener('change', serializeUnavailableSlots);
+    });
+    document.getElementById('setup-form').addEventListener('submit', serializeUnavailableSlots);
+    serializeUnavailableSlots();
+  </script>
 </body>
 </html>

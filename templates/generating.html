@@ -8,22 +8,28 @@
 </head>
 <body>
   <div class="container py-4">
-    <h1 class="mb-3">Screen 4 — Generating Schedules</h1>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h1 class="mb-0">Screen 4 — Generating Schedules</h1>
+      <a href="/setup" class="btn btn-outline-secondary">Back to setup</a>
+    </div>
     <p class="text-muted">Screen 4 of 5: background optimization running.</p>
     <p class="small text-muted">
       Engine iterations: {{ num_restarts }} • Candidates: {{ num_results }}
+      (actual candidates generated shown in progress panel) • Iterations per temp: {{ iterations_per_temp }}
       {% if time_budget_seconds %}
         • Time budget: {{ time_budget_seconds }}s
       {% endif %}
     </p>
 
     <div id="status" class="alert alert-secondary">Starting generation...</div>
+    <div id="generation-timer" class="small text-muted mb-2"></div>
 
     <div class="table-responsive">
       <table class="table table-sm">
         <thead>
           <tr>
             <th>Run</th>
+            <th>Candidates Generated</th>
             <th>Latest best score</th>
           </tr>
         </thead>
@@ -38,6 +44,18 @@
     const statusEl = document.getElementById('status');
     const body = document.getElementById('progress-body');
     const reviewLink = document.getElementById('review-link');
+    const timerEl = document.getElementById('generation-timer');
+
+    function formatSeconds(value) {
+      const seconds = Math.max(0, Number(value || 0));
+      if (!Number.isFinite(seconds)) {
+        return '0s';
+      }
+      const rounded = Math.round(seconds);
+      const mins = Math.floor(rounded / 60);
+      const secs = rounded % 60;
+      return `${mins}:${String(secs).padStart(2, '0')}`;
+    }
 
     async function refresh() {
       try {
@@ -54,9 +72,15 @@
         body.innerHTML = '';
         entries.slice(-12).forEach((entry) => {
           const row = document.createElement('tr');
-          row.innerHTML = `<td>${entry.run_number ?? ''}</td><td>${entry.best_score ?? 'N/A'}</td>`;
+          const candidatesGenerated = entry.candidates_generated ?? data.run_candidates_generated ?? 0;
+          row.innerHTML = `<td>${entry.run_number ?? ''} / ${data.run_total_restarts ?? ''}</td><td>${candidatesGenerated}</td><td>${entry.best_score ?? 'N/A'}</td>`;
           body.appendChild(row);
         });
+
+        const elapsed = Number(data.run_elapsed_seconds || 0);
+        const remaining = Number(data.run_estimated_remaining_seconds || 0);
+        const remainingText = remaining > 0 ? ` ETA ${formatSeconds(remaining)}` : '';
+        timerEl.textContent = `Elapsed: ${formatSeconds(elapsed)}${remainingText} • Engine iterations completed: ${data.run_iterations_completed || 0} / ${data.run_total_restarts || 0} • Candidates generated: ${data.run_candidates_generated || 0}`;
 
         if (data.run_error) {
           statusEl.className = 'alert alert-danger';
@@ -67,14 +91,15 @@
 
         if (!data.run_in_progress && data.done) {
           statusEl.className = 'alert alert-success';
-          statusEl.textContent = 'Generation complete.';
+          statusEl.textContent = `Generation complete. ${data.run_candidates_generated || 0} distinct schedules available, ${data.run_requested_candidates || 0} requested.`;
           reviewLink.className = 'btn btn-success';
           reviewLink.classList.remove('d-none');
           clearInterval(timer);
           return;
         }
 
-        statusEl.textContent = `In progress... Best score: ${data.best_score ?? 'N/A'}`;
+        statusEl.textContent = `In progress... Best score: ${data.best_score ?? 'N/A'}`
+          + ` (engine iterations ≠ candidates; each iteration is one restart attempt).`;
       } catch (error) {
         statusEl.className = 'alert alert-danger';
         statusEl.textContent = String(error);

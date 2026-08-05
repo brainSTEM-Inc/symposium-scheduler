@@ -11,6 +11,33 @@
     <h1 class="mb-3">Symposium Scheduler</h1>
     <p class="text-muted">Upload a CSV export (or paste a public Google Sheet CSV URL) to generate candidate schedules.</p>
 
+    <div id="runtime-profile" class="mb-3">
+      {% if generation_profile %}
+        {% set last_restarts = generation_profile.get('num_restarts', 0) | int %}
+        {% set elapsed_seconds = generation_profile.get('elapsed_seconds', 0) | float %}
+        {% set candidates_generated = generation_profile.get('candidates_generated', 0) | int %}
+        <div class="alert alert-info">
+          <strong>Latest run:</strong>
+          {{ "%.1f"|format(elapsed_seconds) }} sec for
+          {{ last_restarts }} iterations and
+          {{ candidates_generated }} generated candidates.
+          <span class="d-block small text-muted">
+            Approximately
+            {{ "%.2f"|format((elapsed_seconds / (last_restarts if last_restarts > 0 else 1))) }} sec per restart.
+            {% if candidates_generated %}
+              About {{ "%.2f"|format(elapsed_seconds / candidates_generated) }} sec per generated candidate.
+            {% endif %}
+          </span>
+        </div>
+      {% endif %}
+      <div class="small text-muted">
+        Engine iterations = number of restart attempts (each can produce one candidate schedule). If that seems high, reduce it for faster runs.
+      </div>
+      <div class="small text-muted mb-2">
+        Iterations per temp controls how many swap attempts happen at each annealing temperature inside each restart.
+      </div>
+    </div>
+
     {% if error %}
       <div class="alert alert-danger">{{ error }}</div>
     {% endif %}
@@ -100,7 +127,54 @@
       </div>
     </form>
 
+    <div id="runtime-estimate" class="small text-muted mt-3"></div>
+
     <p class="mt-4 text-muted">Screen 1 of 5: Data upload. After submit, you’ll move to Responses Viewer.</p>
   </div>
+
+  <script>
+    const runtimeProfile = {{ generation_profile | tojson if generation_profile is not none else "null" }};
+    const runtimeEstimateEl = document.getElementById('runtime-estimate');
+    const numRestartInput = document.querySelector('input[name="num_restarts"]');
+    const numResultsInput = document.querySelector('input[name="num_results"]');
+
+    function formatSeconds(value) {
+      const seconds = Math.max(0, Number(value || 0));
+      if (!Number.isFinite(seconds)) {
+        return '0';
+      }
+      return seconds.toFixed(1);
+    }
+
+    function updateRuntimeEstimate() {
+      if (!runtimeProfile || !runtimeProfile.elapsed_seconds) {
+        runtimeEstimateEl.textContent = '';
+        return;
+      }
+
+      const lastRestarts = Number(runtimeProfile.num_restarts || 0);
+      const perRestart = lastRestarts > 0 ? Number(runtimeProfile.elapsed_seconds) / lastRestarts : 0;
+      const requestedRestarts = Number(numRestartInput?.value || 0);
+      const requestedCandidates = Number(numResultsInput?.value || 0);
+      const extraCandidatesEstimate =
+        Number(runtimeProfile.candidates_generated || 0) > 0
+          ? Number(runtimeProfile.elapsed_seconds) / Number(runtimeProfile.candidates_generated)
+          : 0;
+
+      const estimatedTotal = perRestart * requestedRestarts;
+      runtimeEstimateEl.textContent =
+        `Rough run-time estimate from last run: ${formatSeconds(estimatedTotal)}s for ${requestedRestarts} engine iteration(s); ` +
+        `+1 iteration adds about ${formatSeconds(perRestart)}s. ` +
+        (requestedCandidates > 0
+          ? `Requested ${requestedCandidates} candidate(s) is approximately ${formatSeconds(extraCandidatesEstimate * requestedCandidates)}s.`
+          : '');
+    }
+
+    if (runtimeProfile) {
+      numRestartInput?.addEventListener('input', updateRuntimeEstimate);
+      numResultsInput?.addEventListener('input', updateRuntimeEstimate);
+      updateRuntimeEstimate();
+    }
+  </script>
 </body>
 </html>
