@@ -176,6 +176,16 @@ def _coerce_room_unavailable_payload(raw: Any, structure: Dict[str, Any]) -> lis
     return unavailable
 
 
+def _iter_room_slots(structure: Dict[str, Any]):
+    periods = [str(period).strip() for period in structure.get("periods", [])]
+    days = [str(day).strip() for day in structure.get("days", [])]
+    num_rooms = int(structure.get("num_rooms", 0) or 0)
+    for period in periods:
+        for day in days:
+            for room in range(num_rooms):
+                yield period, day, room
+
+
 def _room_unavailable_set_from_state(state: Dict[str, Any], structure: Dict[str, Any]) -> set[tuple[str, str, int]]:
     unavailable: set[tuple[str, str, int]] = set()
     for period, day, room in _coerce_room_unavailable_payload(state.get("room_unavailable_slots", []), structure):
@@ -820,9 +830,15 @@ def setup():
     if request.method == "POST":
         manual_large = request.form.getlist("manual_large_room")
         state["manual_large_room"] = manual_large
-        state["room_unavailable_slots"] = _coerce_room_unavailable_payload(
+        available_slots = _coerce_room_unavailable_payload(
             request.form.get("room_availability_json"), state["structure"]
         )
+        available_set = set(available_slots)
+        state["room_unavailable_slots"] = [
+            (period, day, room)
+            for period, day, room in _iter_room_slots(state["structure"])
+            if (period, day, room) not in available_set
+        ]
 
         _launch_generation(workflow_id)
         return redirect(url_for("generating_view"))
@@ -850,9 +866,10 @@ def setup():
         num_restarts=state["num_restarts"],
         num_results=state["num_results"],
         manual_large_room=state.get("manual_large_room", []),
-        room_unavailable_slot_keys=[
+        room_available_slot_keys=[
             f"{period}|{day}|{room}"
-            for period, day, room in _coerce_room_unavailable_payload(state.get("room_unavailable_slots", []), state["structure"])
+            for period, day, room in _iter_room_slots(state["structure"])
+            if (period, day, room) not in _room_unavailable_set_from_state(state, state["structure"])
         ],
     )
 
