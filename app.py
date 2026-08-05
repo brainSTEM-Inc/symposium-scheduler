@@ -850,7 +850,6 @@ def setup():
         num_restarts=state["num_restarts"],
         num_results=state["num_results"],
         manual_large_room=state.get("manual_large_room", []),
-        room_unavailable_slots=state.get("room_unavailable_slots", []),
         room_unavailable_slot_keys=[
             f"{period}|{day}|{room}"
             for period, day, room in _coerce_room_unavailable_payload(state.get("room_unavailable_slots", []), state["structure"])

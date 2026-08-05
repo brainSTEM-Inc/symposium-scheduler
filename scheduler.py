@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import math
 import random
-import io
 import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
-import requests
 
 SlotKey = Tuple[str, str, int]
 
@@ -218,9 +216,7 @@ def _extract_name_candidates(raw: Any, valid_names: Iterable[str]) -> List[str]:
 
 def load_dataframe(url_or_path: str) -> pd.DataFrame:
     if _normalize_text(url_or_path).lower().startswith("http"):
-        response = requests.get(url_or_path, timeout=30)
-        response.raise_for_status()
-        return pd.read_csv(io.StringIO(response.text))
+        return pd.read_csv(url_or_path)
     return pd.read_csv(url_or_path)
 
 

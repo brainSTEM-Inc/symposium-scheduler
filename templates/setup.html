@@ -79,24 +79,23 @@
                   {% endfor %}
                 </tr>
               </thead>
-              <tbody>
-                {% for room_index in range(structure.num_rooms | int) %}
-                  <tr>
-                    <th>Room {{ room_index + 1 }}</th>
-                    {% for day in structure.days %}
-                      {% for period in structure.periods %}
-                        {% set slot_key = period ~ "|" ~ day ~ "|" ~ room_index %}
-                        <td>
-                          <div class="form-check text-center">
-                            <input
-                              class="form-check-input room-unavailable-toggle"
-                              type="checkbox"
-                              id="room-{{ room_index }}-{{ loop.parent.loop.index0 }}-{{ loop.index0 }}"
-                              data-period="{{ period }}"
-                              data-day="{{ day }}"
-                              data-room="{{ room_index }}"
-                              {% if slot_key in unavailable_keys %}
-                                checked
+                <tbody>
+                  {% for room_index in range(structure.num_rooms | int) %}
+                    <tr>
+                      <th>Room {{ room_index + 1 }}</th>
+                      {% for day in structure.days %}
+                        {% for period in structure.periods %}
+                          {% set slot_key = period ~ "|" ~ day ~ "|" ~ room_index %}
+                          <td>
+                            <div class="form-check text-center">
+                              <input
+                                class="form-check-input room-unavailable-toggle"
+                                type="checkbox"
+                                data-period="{{ period }}"
+                                data-day="{{ day }}"
+                                data-room="{{ room_index }}"
+                                {% if slot_key in unavailable_keys %}
+                                  checked
                               {% endif %}
                             >
                           </div>
