@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app --workers 2 --timeout 120
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120
     envVars:
       - key: FLASK_SECRET_KEY
         sync: false

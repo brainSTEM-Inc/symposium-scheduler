@@ -1,10 +1,24 @@
 <!doctype html>
 <html>
+{% macro penalty_label(key) -%}
+  {% set labels = {
+    'topic_mismatch_room': 'Topic mismatch within a room',
+    'mutual_ppp_not_paired': 'Mutual Preferred Pair Presenters not paired',
+    'one_way_ppp_not_paired': 'One-way Preferred Pair Presenter not paired',
+    'same_topic_across_rooms': 'Same topic across rooms in one timeslot',
+    'mutual_bf_same_timeslot': 'Mutual Best friend(s) in different rooms in one timeslot',
+    'one_way_bf_same_timeslot': 'One-way Best friend(s) in different rooms in one timeslot',
+    'empty_slot_not_clustered': 'Empty rooms not clustered',
+    'large_room_missed': 'Large room preference missed'
+  } %}
+  {{ labels.get(key, key.replace('_', ' ')|title) }}
+{%- endmacro %}
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Symposium Scheduler — Review</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet" />
+  <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet" />
 </head>
 <body>
   <div class="container py-4">
@@ -76,7 +90,7 @@
         <h6>Penalty breakdown</h6>
         <ul>
           {% for key, value in selected_candidate[2].items() %}
-            <li>{{ key }}: {{ value }}</li>
+            <li>{{ penalty_label(key) }}: {{ value }}</li>
           {% endfor %}
         </ul>
 
@@ -88,6 +102,13 @@
             <button id="rerun-btn" class="btn btn-outline-primary" type="submit">Recompute penalty breakdown</button>
           </div>
         </form>
+        <section class="card mb-3" aria-labelledby="presenter-details-heading" aria-live="polite">
+          <div class="card-body">
+            <h5 class="card-title" id="presenter-details-heading">Presenter details</h5>
+            <p id="presenter-details-prompt" class="mb-0">Select a presenter card to view their preferences and constraints.</p>
+            <dl id="presenter-details" class="row mb-0 d-none"></dl>
+          </div>
+        </section>
 
         {% for day in selected_schedule.days %}
           <h5 class="mt-4">{{ day }}</h5>
@@ -100,7 +121,7 @@
                     <th>
                       Room {{ room + 1 }}
                       {% if room == selected_schedule.large_room_index %}
-                        <span class="badge text-bg-info ms-1">Large room</span>
+                        <span class="badge text-bg-primary ms-1">Large room</span>
                       {% endif %}
                     </th>
                   {% endfor %}
@@ -119,6 +140,9 @@
                             <div
                               class="presenter-card card card-body py-1 px-2"
                               draggable="true"
+                              tabindex="0"
+                              role="button"
+                              aria-label="Show details for {{ presenter }}"
                               data-presenter-id="{{ day }}-{{ room }}-{{ period }}-{{ loop.index0 }}"
                               data-presenter-name="{{ presenter }}"
                               data-day="{{ day }}"
@@ -167,7 +191,7 @@
                 <h6>Penalty breakdown</h6>
                 <ul>
                   {% for key, value in result_item[2].items() %}
-                    <li>{{ key }}: {{ value }}</li>
+                    <li>{{ penalty_label(key) }}: {{ value }}</li>
                   {% endfor %}
                 </ul>
                 <pre style="white-space: pre-wrap;">{{ result_item[1] | tojson(indent=2) }}</pre>
@@ -191,9 +215,37 @@
     if (!constraintStatus || !hiddenPins) {
       // No schedule loaded yet, or candidate table not available.
     } else {
-      const basePins = {{ selected_schedule.initial_pins | default({}) | tojson }};
+      const basePins = {{ (selected_schedule.initial_pins if selected_schedule is defined else {}) | tojson }};
+      const profiles = {{ (selected_schedule.presenter_profiles if selected_schedule is defined else {}) | tojson }};
+      const unavailableRooms = {{ (selected_schedule.room_unavailable if selected_schedule is defined else []) | tojson }};
+      const fixedEmptySlots = {{ (selected_schedule.fixed_empty_slots if selected_schedule is defined else []) | tojson }};
+      const largeRoomIndex = Number({% if selected_schedule is defined %}{{ selected_schedule.large_room_index }}{% else %}0{% endif %});
       const slotCells = Array.from(document.querySelectorAll('.slot-cell'));
       const presenterCards = Array.from(document.querySelectorAll('.presenter-card'));
+      const details = document.getElementById('presenter-details');
+      const detailsPrompt = document.getElementById('presenter-details-prompt');
+
+      function showPresenterDetails(name) {
+        const profile = profiles[name];
+        if (!profile || !details) return;
+        const rows = [
+          ['Project title', profile.title || '—'],
+          ['Topics', (profile.topics || []).join(', ') || '—'],
+          ['Availability', (profile.availability || []).map((pair) => `${pair[0]} · ${pair[1]}`).join('; ') || 'None'],
+          ['Preferred Pair Presenter(s)', (profile.preferred_pair_presenters || []).join(', ') || 'None'],
+          ['Best friend(s)', (profile.best_friends || []).join(', ') || 'None'],
+          ['Large room preference', profile.large_room || 'Maybe'],
+          ['Present twice', profile.present_twice ? 'Yes' : 'No']
+        ];
+        details.replaceChildren();
+        rows.forEach(([label, value]) => {
+          const term = document.createElement('dt'); term.className = 'col-sm-3'; term.textContent = label;
+          const description = document.createElement('dd'); description.className = 'col-sm-9'; description.textContent = value;
+          details.append(term, description);
+        });
+        detailsPrompt.textContent = name;
+        details.classList.remove('d-none');
+      }
 
       function collectPins() {
         const pins = {};
@@ -228,8 +280,20 @@
       function validateSlots() {
         const payload = collectPins();
         let hasOverflow = false;
+        let hasHardViolation = false;
         slotCells.forEach((cell) => {
           const count = cell.querySelectorAll('.presenter-card').length;
+          const period = cell.dataset.period, day = cell.dataset.day, room = Number(cell.dataset.room);
+          const closed = [unavailableRooms, fixedEmptySlots].some((slots) => slots.some((slot) => slot[0] === period && slot[1] === day && Number(slot[2]) === room));
+          let cellViolation = closed && count > 0;
+          cell.querySelectorAll('.presenter-card').forEach((card) => {
+            const profile = profiles[card.dataset.presenterName] || {};
+            const allowed = (profile.availability || []).some((pair) => pair[0] === period && pair[1] === day);
+            const invalid = !allowed || (room === largeRoomIndex && profile.large_room === 'No');
+            card.classList.toggle('presenter-invalid', invalid);
+            cellViolation ||= invalid;
+          });
+          hasHardViolation ||= cellViolation;
           if (maxPresentersPerRoom > 0 && count > maxPresentersPerRoom) {
             hasOverflow = true;
             cell.classList.add('slot-overflow');
@@ -251,12 +315,18 @@
         }
         if (hasOverflow) {
           constraintStatus.textContent = `${Object.keys(payload).length} presenters changed. Fix any overflow slot (shown in red) to re-run or export.`;
+        } else if (hasHardViolation) {
+          constraintStatus.textContent = `${Object.keys(payload).length} presenters changed. Hard availability, room, or capacity conflicts are highlighted in red.`;
         }
       }
 
       let dragPayload = null;
 
       presenterCards.forEach((card) => {
+        card.addEventListener('click', () => showPresenterDetails(card.dataset.presenterName));
+        card.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showPresenterDetails(card.dataset.presenterName); }
+        });
         card.addEventListener('dragstart', (event) => {
           dragPayload = {
             presenterId: card.dataset.presenterId,
@@ -329,7 +399,7 @@
       font-size: 0.8rem;
       cursor: grab;
       user-select: none;
-      background-color: #f8f9fa;
+      background-color: #fff;
       border: 1px solid rgba(0, 0, 0, 0.15);
     }
 
@@ -344,17 +414,19 @@
     }
 
     .slot-overflow {
-      background-color: #ffe6ea !important;
-      border: 2px solid #dc3545 !important;
-      box-shadow: inset 0 0 0 1px #dc3545;
+      background-color: #d9d9d9 !important;
+      border: 2px solid #b51111 !important;
+      box-shadow: inset 0 0 0 1px #b51111;
     }
 
     .slot-overflow .presenter-card {
-      border-color: #dc3545 !important;
-      background-color: #fff5f6 !important;
+      border-color: #b51111 !important;
+      background-color: #d9d9d9 !important;
     }
+
+    .presenter-invalid { border: 2px solid #b51111 !important; background: #d9d9d9 !important; }
   </style>
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
 </body>
 </html>

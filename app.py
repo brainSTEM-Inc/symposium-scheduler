@@ -325,41 +325,25 @@ def _build_candidate_slot_grid(
         ordered_cells[day] = day_cells
 
     presenter_titles = {}
-    topic_colors: Dict[str, str] = {}
-    all_topics = sorted(
-        {
-            topic.strip().lower()
-            for presenter in presenters_by_name.values()
-            if presenter is not None
-            for topic in getattr(presenter, "topics", [])
-            if isinstance(topic, str) and topic.strip()
-        }
-    )
-    for index, topic in enumerate(all_topics):
-        hue = int((index * 137.5) % 360)
-        topic_colors[topic] = f"hsl({hue}, 78%, 88%)"
-
     presenter_styles: Dict[str, str] = {}
     presenter_topics: Dict[str, str] = {}
+    presenter_profiles: Dict[str, Dict[str, Any]] = {}
     for name, presenter in presenters_by_name.items():
         if presenter is not None:
             presenter_titles[name] = str(getattr(presenter, "title", "") or "")
             topics = [str(topic).strip() for topic in getattr(presenter, "topics", []) if str(topic).strip()]
             presenter_topics[name] = ", ".join(topics)
-            normalized_topics = [topic.lower() for topic in topics]
-            style = ""
-            if len(normalized_topics) == 1:
-                color = topic_colors.get(normalized_topics[0], "#f8f9fa")
-                style = f"background: {color};"
-            elif len(normalized_topics) >= 2:
-                color_a = topic_colors.get(normalized_topics[0], "#e9ecef")
-                color_b = topic_colors.get(normalized_topics[1], "#dee2e6")
-                style = (
-                    f"background: linear-gradient(90deg, {color_a} 0% 50%, {color_b} 50% 100%);"
-                )
-            else:
-                style = "background: #f8f9fa;"
-            presenter_styles[name] = style
+            presenter_styles[name] = "border-left: 4px solid #B51111;"
+            presenter_profiles[name] = {
+                "name": name,
+                "title": str(getattr(presenter, "title", "") or ""),
+                "topics": topics,
+                "availability": [list(pair) for pair in getattr(presenter, "availability", [])],
+                "preferred_pair_presenters": [person.name for person in getattr(presenter, "ppp", [])],
+                "best_friends": [person.name for person in getattr(presenter, "bf", [])],
+                "large_room": str(getattr(presenter, "large_room", "Maybe")),
+                "present_twice": bool(getattr(presenter, "present_twice", False)),
+            }
 
     return {
         "days": day_order,
@@ -369,6 +353,7 @@ def _build_candidate_slot_grid(
         "presenter_titles": presenter_titles,
         "presenter_topics": presenter_topics,
         "presenter_styles": presenter_styles,
+        "presenter_profiles": presenter_profiles,
         "initial_pins": initial_pins,
         "large_room_index": int(structure.get("large_room_index", 0)),
         "presenters_per_room": int(structure.get("presenters_per_room", 0)),
@@ -431,8 +416,11 @@ def _safe_build_state(source_type: str, source: str, col_config: Dict[str, str],
         "pins": {},
         "manual_large_room": [],
         "fixed_empty_slots": [],
+        "preflight_conflicts": [],
+        "preflight_warnings": [],
+        "preflight_ready": False,
         "room_unavailable_slots": [],
-        "num_restarts": 10,
+        "num_restarts": 8,
         "num_results": 5,
         "time_budget_seconds": 180,
         "iterations_per_temp": 12,
@@ -593,6 +581,7 @@ def _launch_generation(workflow_id: str):
             state["run_in_progress"] = True
             state["run_progress"] = []
             state["run_error"] = None
+            state["best_score"] = None
             state["run_iterations_completed"] = 0
             state["run_candidates_generated"] = 0
             state["run_elapsed_seconds"] = 0.0
@@ -608,11 +597,16 @@ def _launch_generation(workflow_id: str):
                     return
                 if run_number is None:
                     return
+                if score is not None and (
+                    state_ref.get("best_score") is None or score < state_ref.get("best_score", float("inf"))
+                ):
+                    state_ref["best_score"] = score
                 state_ref["run_progress"].append(
                     {
                         "run_number": run_number,
                         "total": total_runs,
-                        "best_score": score,
+                        "run_score": score,
+                        "best_score": state_ref.get("best_score"),
                         "candidates_generated": candidates_generated or 0,
                     }
                 )
@@ -622,10 +616,6 @@ def _launch_generation(workflow_id: str):
                 if total_runs and run_number > 0:
                     remaining_runs = max(0, total_runs - run_number)
                     state_ref["run_estimated_remaining_seconds"] = (elapsed_seconds / run_number) * remaining_runs
-                if score is not None and (
-                    state_ref.get("best_score") is None or score < state_ref.get("best_score", float("inf"))
-                ):
-                    state_ref["best_score"] = score
 
         try:
             with WORKFLOW_LOCK:
@@ -830,6 +820,27 @@ def setup():
     if request.method == "POST":
         manual_large = request.form.getlist("manual_large_room")
         state["manual_large_room"] = manual_large
+        state["num_results"] = max(1, min(30, _coerce_int(request.form.get("num_results"), 5)))
+        state["num_restarts"] = max(1, min(100, _coerce_int(request.form.get("num_restarts"), 8)))
+        state["iterations_per_temp"] = max(1, min(100, _coerce_int(request.form.get("iterations_per_temp"), 12)))
+        state["time_budget_seconds"] = _coerce_optional_int(request.form.get("time_budget_seconds"), 180)
+        if state["time_budget_seconds"] is not None and state["time_budget_seconds"] <= 0:
+            state["time_budget_seconds"] = None
+        state["max_outer_iterations"] = _coerce_optional_int(request.form.get("max_outer_iterations"), None)
+        if state["max_outer_iterations"] is not None and state["max_outer_iterations"] <= 0:
+            state["max_outer_iterations"] = None
+        pins = _normalize_json(request.form.get("pins_json", "{}"), {})
+        valid_names = set(state.get("presenters_by_name", {}))
+        state["pins"] = {
+            name: pin for name, pin in pins.items()
+            if name in valid_names and isinstance(pin, dict)
+            and ((pin.get("period") in state["structure"]["periods"]
+                  and pin.get("day") in state["structure"]["days"])
+                 or (pin.get("period") is None and pin.get("day") is None
+                     and pin.get("room") is not None))
+        } if isinstance(pins, dict) else {}
+        fixed_empty = _normalize_json(request.form.get("fixed_empty_json", "[]"), [])
+        state["fixed_empty_slots"] = _parse_fixed_empty_slots(fixed_empty, state["structure"], state["structure"]["days"])
         available_slots = _coerce_room_unavailable_payload(
             request.form.get("room_availability_json"), state["structure"]
         )
@@ -840,14 +851,35 @@ def setup():
             if (period, day, room) not in available_set
         ]
 
+        prior_warnings = state.get("preflight_warnings", [])
+        had_preflight = state.get("preflight_ready", False)
+        preflight = run(
+            state["source"], col_config=state["col_config"], structure=state["structure"],
+            pins=state["pins"], penalties=state["penalties"], num_restarts=0, num_results=state["num_results"],
+            fixed_empty_slots=state["fixed_empty_slots"], manual_large_room=manual_large,
+            room_unavailable_slots=state["room_unavailable_slots"], preflight_only=True,
+        )
+        state["preflight_conflicts"] = preflight["hard_conflicts"]
+        state["preflight_warnings"] = preflight["warnings"]
+        state["preflight_ready"] = True
+        confirmation_needs_review = (
+            request.form.get("confirmed") == "1"
+            and had_preflight
+            and preflight["warnings"] != prior_warnings
+        )
+        if preflight["hard_conflicts"] or request.form.get("confirmed") != "1" or confirmation_needs_review:
+            return redirect(url_for("setup"))
+
         _launch_generation(workflow_id)
         return redirect(url_for("generating_view"))
 
     presenter_rows = []
+    all_presenter_rows = []
     for row in state["records"]:
         name = str(row.get(state["col_config"]["name"], "")).strip()
         if not name:
             continue
+        all_presenter_rows.append({"name": name})
         large_room = str(row.get(state["col_config"]["large_room"], "")).strip().lower()
         if large_room not in {"yes", "maybe"}:
             continue
@@ -865,6 +897,16 @@ def setup():
         presenter_rows=presenter_rows,
         num_restarts=state["num_restarts"],
         num_results=state["num_results"],
+        iterations_per_temp=state["iterations_per_temp"],
+        time_budget_seconds=state["time_budget_seconds"],
+        max_outer_iterations=state["max_outer_iterations"],
+        all_presenter_rows=all_presenter_rows,
+        fixed_empty_slot_keys=[f"{p}|{d}|{r}" for p, d, r in state.get("fixed_empty_slots", [])],
+        generation_profile=session.get("generation_profile"),
+        pins=state.get("pins", {}),
+        preflight_conflicts=state.get("preflight_conflicts", []),
+        preflight_warnings=state.get("preflight_warnings", []),
+        preflight_ready=state.get("preflight_ready", False),
         manual_large_room=state.get("manual_large_room", []),
         room_available_slot_keys=[
             f"{period}|{day}|{room}"
@@ -918,6 +960,7 @@ def api_run_status():
             "run_iterations_completed": state.get("run_iterations_completed", 0),
             "run_candidates_generated": state.get("run_candidates_generated", 0),
             "run_elapsed_seconds": state.get("run_elapsed_seconds", 0.0),
+            "run_started_at": state.get("run_started_at"),
             "run_estimated_remaining_seconds": state.get("run_estimated_remaining_seconds"),
             "run_requested_candidates": state.get("num_results", 0),
             "iterations_per_temp": state.get("iterations_per_temp", 12),
@@ -948,6 +991,14 @@ def review_view():
         state["structure"],
         state.get("presenters_by_name", {}),
     )
+    selected_schedule["room_unavailable"] = [
+        [period, day, room]
+        for period, day, room in sorted(_room_unavailable_set_from_state(state, state["structure"]))
+    ]
+    selected_schedule["fixed_empty_slots"] = [
+        [period, day, room]
+        for period, day, room in sorted(_parse_fixed_empty_slots(state.get("fixed_empty_slots", []), state["structure"], state["structure"]["days"]))
+    ]
     return render_template(
         "review.html",
         result=result,
