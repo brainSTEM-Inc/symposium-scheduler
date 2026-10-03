@@ -102,8 +102,8 @@ def test_run_basic_smoke():
         )
 
     assert "presenters" in result
-        assert len(result["presenters"]) == 2
-        assert isinstance(result["hard_conflicts"], list)
+    assert len(result["presenters"]) == 2
+    assert isinstance(result["hard_conflicts"], list)
 
 
 def test_fixed_empty_slot_blocks_assignment():
@@ -154,3 +154,33 @@ def test_fixed_empty_slot_blocks_assignment():
 
     assert result["hard_conflicts"], "Expected hard conflict when all slots are fixed-empty"
     assert "no available timeslots" in result["hard_conflicts"][0]["message"].lower()
+
+
+def test_room_only_pin_is_preflighted_and_enforced():
+    row = ["A, B", "Project 1", "Biology", "PD 2, Tuesday, December 15th", "", "", "Maybe", "No"]
+    df = pd.DataFrame([row], columns=[
+        DEFAULT_COL_CONFIG["name"], DEFAULT_COL_CONFIG["title"], DEFAULT_COL_CONFIG["topics"],
+        DEFAULT_COL_CONFIG["availability"], DEFAULT_COL_CONFIG["ppp"], DEFAULT_COL_CONFIG["bf"],
+        DEFAULT_COL_CONFIG["large_room"], DEFAULT_COL_CONFIG["present_twice"],
+    ])
+    structure = {
+        **DEFAULT_STRUCTURE,
+        "num_rooms": 2,
+        "large_room_index": 0,
+        "presenters_per_room": 1,
+        "periods": ["PD 2"],
+        "days": ["Tuesday, December 15th"],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        csv_path = Path(td) / "presenters.csv"
+        df.to_csv(csv_path, index=False)
+        preflight = run(
+            str(csv_path), structure=structure, pins={"A, B": {"room": 1}}, preflight_only=True
+        )
+        assert not preflight["hard_conflicts"]
+        result = run(
+            str(csv_path), structure=structure, pins={"A, B": {"room": 1}},
+            num_restarts=1, num_results=1, max_outer_iterations=1,
+        )
+    assert not result["hard_conflicts"]
+    assert result["results"][0][1]["PD 2|Tuesday, December 15th|1"] == ["A, B"]

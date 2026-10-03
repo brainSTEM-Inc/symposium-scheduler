@@ -430,17 +430,24 @@ def _coerce_pin_to_slot(
     period = pin.get("period")
     day = pin.get("day")
     room = pin.get("room", pin.get("room_index"))
-    if period is None or day is None:
+    if (period is None) != (day is None):
         return {}
-    if str(period).strip() not in periods or str(day).strip() not in days:
+    if period is None and room is None:
+        return {}
+    if period is not None and (str(period).strip() not in periods or str(day).strip() not in days):
         return {}
     try:
         room_i = None if room is None else int(room)
     except (TypeError, ValueError):
         room_i = None
-    if room_i is not None and not (0 <= room_i < num_rooms):
+    if room is not None and (room_i is None or not (0 <= room_i < num_rooms)):
         room_i = None
-    return {"period": str(period).strip(), "day": str(day).strip(), "room": room_i}
+        return {}
+    return {
+        "period": str(period).strip() if period is not None else None,
+        "day": str(day).strip() if day is not None else None,
+        "room": room_i,
+    }
 
 
 def _build_presenter_pin_lookup(
@@ -461,7 +468,7 @@ def _build_presenter_pin_lookup(
             unknown.append({"name": raw_name, "pin": raw_pin})
             continue
         pinned[presenter] = resolved
-        presenter.pinned_slot = (resolved["period"], resolved["day"])
+        presenter.pinned_slot = (resolved["period"], resolved["day"]) if resolved["period"] is not None else None
         presenter.pinned_room = resolved["room"]
     return pinned, unknown
 
@@ -542,9 +549,13 @@ def _domain_for_presenter(
             continue
         if room < 0 or room >= int(structure["num_rooms"]):
             continue
+        if presenter.large_room == "No" and room == int(structure["large_room_index"]):
+            continue
         if (period, day, room) in fixed_empty:
             continue
         if (period, day, room) in room_unavailable:
+            continue
+        if presenter.pinned_room is not None and room != presenter.pinned_room:
             continue
         if presenter.pinned_slot is not None and (period, day) != presenter.pinned_slot:
             continue
@@ -882,7 +893,8 @@ def _collect_preflight_warnings(
             if key in seen:
                 continue
             seen.add(key)
-            if not (p._availability_set & q._availability_set):
+            shared_availability = p._availability_set & q._availability_set
+            if not shared_availability:
                 warn_key = ("INFEASIBLE_PPP", f"no_overlap:{key[0]}:{key[1]}")
                 if warn_key not in seen_warning_keys:
                     warnings.append(
@@ -892,7 +904,16 @@ def _collect_preflight_warnings(
                         }
                     )
                     seen_warning_keys.add(warn_key)
-            if p.pinned_slot is not None and q.pinned_slot is not None and p.pinned_slot != q.pinned_slot:
+            pin_constrained_overlap = set(shared_availability)
+            if p.pinned_slot is not None:
+                pin_constrained_overlap &= {p.pinned_slot}
+            if q.pinned_slot is not None:
+                pin_constrained_overlap &= {q.pinned_slot}
+            pins_prevent_pairing = bool(shared_availability) and (
+                not pin_constrained_overlap
+                or (p.pinned_room is not None and q.pinned_room is not None and p.pinned_room != q.pinned_room)
+            )
+            if pins_prevent_pairing:
                 warn_key = ("INFEASIBLE_PPP", f"pins:{key[0]}:{key[1]}")
                 if warn_key not in seen_warning_keys:
                     warnings.append(
@@ -1076,6 +1097,7 @@ def run(
     iterations_per_temp: int = 12,
     max_outer_iterations: Optional[int] = None,
     time_budget_seconds: Optional[float] = None,
+    preflight_only: bool = False,
 ) -> Dict[str, Any]:
     if col_config is None:
         col_config = DEFAULT_COL_CONFIG.copy()
@@ -1152,6 +1174,17 @@ def run(
             "days": structure["days"],
             "df": df,
             "hard_conflicts": hard_conflicts,
+            "warnings": warnings,
+            "unavoidable_minimum": 0,
+            "results": [],
+        }
+
+    if preflight_only:
+        return {
+            "presenters": presenters,
+            "days": structure["days"],
+            "df": df,
+            "hard_conflicts": [],
             "warnings": warnings,
             "unavoidable_minimum": 0,
             "results": [],

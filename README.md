@@ -1,12 +1,14 @@
 # Symposium Scheduler (Redesign)
 
-This repository is a clean re-implementation scaffold focused on the scheduling algorithm.
+This repository contains the Flask-based symposium scheduler and its standalone scheduling engine.
 
 ## Structure
 
 - `scheduler.py` — standalone scheduling engine (`run()` entrypoint).
 - `app.py` — minimal Flask app for CSV URL/file upload and result review.
-- `templates/` — Bootstrap pages for upload and review.
+- `templates/` — five workflow screens, from data upload through schedule review.
+- `static/css/app.css` — shared colors, focus indicators, and responsive accessibility styles.
+- `static/vendor/` — the Bootstrap 5.3.3 CSS and JavaScript bundle used locally, so screens do not depend on a public asset CDN.
 
 ## Quick run
 
@@ -28,11 +30,10 @@ gunicorn --bind 0.0.0.0:5000 app:app
 
 ## Render deployment
 
-- `Procfile` and `render.yaml` are included for one-click deploy.
-- Set environment variables in Render:
-  - `FLASK_SECRET_KEY` (required, set via secret)
-  - `FLASK_DEBUG=0`
-  - `MAX_CONTENT_LENGTH=16777216` (16 MB upload cap)
+- `render.yaml` defines the Render web service. In Render, create a Blueprint from this repository and select the `redesign-2025` branch.
+- Set `FLASK_SECRET_KEY` as a secret environment variable before using the service. Render sets `PORT`; the service runs one Gunicorn worker because workflow state and progress are held in process memory.
+- The free instance can sleep while idle. A schedule generation continues in the active process and the Screen 4 page polls that process for progress.
+- The public `onrender.com` service URL is configured by Render after deployment. Keep the service URL available to the school network administrator to confirm it is reachable from school devices.
 
 ## Production smoke-check (post-deploy)
 
@@ -67,6 +68,10 @@ result = run(
     num_results=3,
 )
 ```
+
+## Verification
+
+Run the core tests with `python -m pytest -q`. For a larger timing and quality check, `performance_benchmark.py` creates deterministic synthetic CSV datasets and can run repeated instances at 50–60 presenters.
 
 ## Test CSV
 
